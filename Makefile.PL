@@ -47,6 +47,9 @@ WriteMakefile(
     OPTIMIZE          => '-g',
     DIR               => [$IPROTOSHARD_BUILDDIR],
     LDFROM            => "\$(OBJECT) $IPROTOSHARD_BUILDDIR/libiprotoshard.a $iprotodir/libiproto.a",
-    depend            => { 'XS.c' => "$IPROTOSHARD_BUILDDIR/libiprotoshard.a $iprotodir/libiproto.a" },
+    depend            => {
+        'XS.c' => "$IPROTOSHARD_BUILDDIR/libiprotoshard.a $iprotodir/libiproto.a",
+        "$IPROTOSHARD_BUILDDIR/libiprotoshard.a" => 'subdirs',
+    },
     clean             => { FILES => $IPROTOSHARD_BUILDDIR },
 );

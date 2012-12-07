@@ -1,15 +1,13 @@
 use strict;
 use warnings;
-use Test::More tests => 11;
+use Test::More tests => 42;
+use Test::LeakTrace;
 use IO::Socket;
 use Time::HiRes qw/sleep time/;
-use POSIX qw/SIGHUP SIGTERM/;
+use POSIX qw/SIGTERM/;
 use MR::Pinger::Const;
 use IPC::SysV qw/IPC_CREAT/;
 use IPC::SharedMem;
-use Benchmark;
-
-$SIG{HUP} = sub {};
 
 BEGIN { use_ok('MR::IProto::XS') };
 
@@ -22,6 +20,11 @@ isa_ok(MR::IProto::XS->new(shards => {}), 'MR::IProto::XS');
 my $PORT = 40000;
 my $EMPTY_PORT = 19999;
 
+{
+    package Test::Smth;
+    use base 'MR::IProto::XS';
+}
+
 check_const();
 check_new();
 check_errors();
@@ -33,7 +36,8 @@ check_priority();
 check_pinger();
 check_fork();
 check_stat();
-#benchmark();
+check_singleton();
+check_leak();
 
 sub fork_test_server {
     my (@cb) = @_;
@@ -56,7 +60,6 @@ sub fork_test_server {
         my %childs;
         foreach my $cb (@cb) {
             if (my $accept = $socket->accept()) {
-#                kill SIGHUP, $parent;
                 my $apid = fork();
                 if ($apid == 0) {
                     $socket->close();
@@ -79,7 +82,6 @@ sub fork_test_server {
             delete $childs{wait()};
         }
         $socket->close();
-#        kill SIGHUP, $parent;
         exit;
     }
     sleep 0.1;
@@ -369,38 +371,45 @@ sub check_stat {
     $iproto->bulk([$msg]) for (1 .. 10);
     undef $iproto;
     ok(@stat == 3 && $stat[0] eq "call" && $stat[1] == 0 && $stat[1] eq "ok" && $stat[2]{count} == 10, "check stat callback");
-    warn "OK";
+    return;
 }
 
-sub benchmark {
-#    use MR::IProto;
-#    my $iperl = MR::IProto->new(servers => '188.93.61.208:30000');
-    my $iproto = MR::IProto::XS->new(masters => ['188.93.61.208:30000']);
-#    my $data = join( '', map chr(hex($_)), split / /, "16 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00 04 8a f7 9a 3b");
-    my $data = [ 16, 0, 0, 1, "\x01\x00\x00\x00\x01", 4, "\x8a\xf7\x9a\x3b" ];
-    my $format = 'LLLL a* La*';
-    timethese(100000, {
-        xs => sub {
-            $iproto->do({
-                code => 17,
-                request  => {
-                    method => 'pack',
-                    format => $format,
-                    data   => $data,
-                },
-                response => {
-                    method => 'unpack',
-                    format => 'L',
-                },
-            });
-        },
-#        perl => sub {
-#            scalar $iperl->send({
-#                msg    => 17,
-#                data   => $data,
-#                pack   => $format,
-#                unpack => 'L',
-#            });
-#        },
+sub check_singleton {
+    my $port = fork_test_server(sub {
+        my ($socket) = @_;
+        check_and_reply($socket, 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 13);
     });
+    {
+        my $singleton = Test::Smth->create_singleton(masters => ["127.0.0.1:$port"]);
+        isa_ok($singleton, "Test::Smth");
+    }
+
+    my $msg = { code => 17, request => { method => 'pack', format => 'Lw/a*L', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L' } };
+    my $resp = Test::Smth->bulk([$msg, $msg, $msg]);
+    is_deeply($resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 13) ], "generic request througth singleton");
+    {
+        my $singleton = Test::Smth->remove_singleton();
+        isa_ok($singleton, "Test::Smth");
+    }
+    return;
+}
+
+sub check_leak {
+    no warnings 'redefine';
+    local *main::is = sub {};
+    local *main::ok = sub {};
+    local *main::cmp_ok = sub {};
+    local *main::isa_ok = sub {};
+    local *main::is_deeply = sub {};
+    no_leaks_ok { check_new() } "constructor not leaks";
+    no_leaks_ok { check_errors() } "error handling not leaks";
+    no_leaks_ok { check_success() } "success query not leaks";
+    no_leaks_ok { check_early_retry() } "early retry not leaks";
+    no_leaks_ok { check_retry() } "retry not leaks";
+    no_leaks_ok { check_replica() } "replica not leaks";
+    no_leaks_ok { check_priority() } "priority not leaks";
+    no_leaks_ok { check_pinger() } "pinger not leaks";
+    no_leaks_ok { check_stat() } "stat not leaks";
+    no_leaks_ok { check_singleton() } "singleton not leaks";
+    return;
 }
