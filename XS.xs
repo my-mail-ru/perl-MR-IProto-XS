@@ -4,7 +4,7 @@
 
 #include "ppport.h"
 
-#include <iproto.h>
+#include <iprotocluster.h>
 #include "iprotoxs.h"
 
 #define MY_CXT_KEY "MR::IProto::XS::_guts" XS_VERSION

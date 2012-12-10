@@ -110,7 +110,7 @@ sub check_and_reply {
 sub check_const {
     is(MR::IProto::XS::ERR_CODE_OK, 0, "ERR_CODE_OK");
     is(MR::IProto::XS::ERR_CODE_CONNECT_ERR, 131078, "libiproto error code");
-    is(MR::IProto::XS::ERR_CODE_TIMEOUT, 65546, "libiprotoshard error code");
+    is(MR::IProto::XS::ERR_CODE_TIMEOUT, 8454149, "libiprotoshard error code");
     is(MR::IProto::XS::LOG_DEBUG, 4, "logmask_t constant");
     return;
 }
@@ -322,6 +322,7 @@ sub check_pinger {
         my $pinger_string = "lwp:xxx,iproto:127.0.0.1:$port1,iproto:127.0.0.1:29998\0";
         my $share = IPC::SharedMem->new(MR::Pinger::Const::SHM_KEY_FALL(), MR::Pinger::Const::SHM_SIZE(), 0666|IPC_CREAT) or die "Failed to create pinger shared memory";
         $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
+        sleep 1;
 
         my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
         my $resp = $iproto->bulk([$msg]);
