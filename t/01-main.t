@@ -371,7 +371,7 @@ sub check_stat {
     my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
     $iproto->bulk([$msg]) for (1 .. 10);
     undef $iproto;
-    ok(@stat == 3 && $stat[0] eq "call" && $stat[1] == 0 && $stat[1] eq "ok" && $stat[2]{count} == 10, "check stat callback");
+    ok(@stat == 4 && $stat[0] eq "call" && !defined $stat[1] && $stat[2] == 0 && $stat[2] eq "ok" && $stat[3]{count} == 10, "check stat callback");
     return;
 }
 

@@ -18,12 +18,14 @@ START_MY_CXT;
 
 typedef SV * MR__IProto__XS;
 
-static void iprotoxs_stat_callback(const char *key, uint32_t error, const iproto_stat_data_t *data) {
+static void iprotoxs_stat_callback(const char *type, const char *server, uint32_t error, const iproto_stat_data_t *data) {
     dSP;
     ENTER;
     SAVETMPS;
     PUSHMARK(SP);
-    mXPUSHp(key, strlen(key));
+    mXPUSHp(type, strlen(type));
+    if (server) mXPUSHp(server, strlen(server));
+    else XPUSHs(&PL_sv_undef);
     SV *errsv = newSVuv(error);
     sv_setpv(errsv, iproto_error_string(error));
     SvIOK_on(errsv);
