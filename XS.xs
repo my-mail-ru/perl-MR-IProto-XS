@@ -12,6 +12,7 @@
 typedef struct {
     HV *singletons;
     SV *stat_callback;
+    HV *soft_retry_callbacks;
 } my_cxt_t;
 
 START_MY_CXT;
@@ -29,12 +30,12 @@ static void iprotoxs_stat_callback(const char *type, const char *server, uint32_
     SV *errsv = newSVuv(error);
     sv_setpv(errsv, iproto_error_string(error));
     SvIOK_on(errsv);
-    XPUSHs(sv_2mortal(errsv));
+    mXPUSHs(errsv);
     HV *datahv = newHV();
     hv_store(datahv, "registered", 10, newSViv(data->registered), 0);
     hv_store(datahv, "wallclock", 9, newSVnv(data->wallclock.tv_sec + (data->wallclock.tv_usec / 1000000.)), 0);
     hv_store(datahv, "count", 5, newSVuv(data->count), 0);
-    XPUSHs(sv_2mortal(newRV_noinc((SV *)datahv)));
+    mXPUSHs(newRV_noinc((SV *)datahv));
     PUTBACK;
     dMY_CXT;
     call_sv(MY_CXT.stat_callback, G_EVAL|G_DISCARD);
@@ -44,6 +45,32 @@ static void iprotoxs_stat_callback(const char *type, const char *server, uint32_
     }
     FREETMPS;
     LEAVE;
+}
+
+static bool iprotoxs_soft_retry_callback(iproto_message_t *message) {
+    dMY_CXT;
+    SV **val = hv_fetch(MY_CXT.soft_retry_callbacks, (char *)message, sizeof(message), 0);
+    if (!val) return false;
+    SV *callback = SvRV(*val);
+    size_t size;
+    bool replica;
+    void *data = iproto_message_response(message, &size, &replica);
+    dSP;
+    ENTER;
+    SAVETMPS;
+    PUSHMARK(SP);
+    mXPUSHp(data, size);
+    PUTBACK;
+    call_sv(callback, G_EVAL|G_SCALAR);
+    SPAGAIN;
+    if (SvTRUE(ERRSV)) {
+        warn("MR::IProto::XS: died in soft_retry callback: %s", SvPV_nolen(ERRSV));
+    }
+    bool result = SvTRUEx(POPs);
+    PUTBACK;
+    FREETMPS;
+    LEAVE;
+    return result;
 }
 
 static void iprotoxs_servers_set(iproto_shard_t *shard, bool is_replica, AV *config) {
@@ -203,6 +230,19 @@ void iprotoxs_parse_opts(iproto_message_opts_t *opts, HV *request) {
         }
     }
 
+    if ((val = hv_fetch(request, "timeout", 7, 0))) {
+        if (SvIOK(*val)) {
+            opts->timeout.tv_sec = SvIV(*val);
+            opts->timeout.tv_usec = 0;
+        } else if (SvNOK(*val)) {
+            NV timeout = SvNV(*val);
+            opts->timeout.tv_sec = floor(timeout);
+            opts->timeout.tv_usec = floor((timeout - opts->timeout.tv_sec) * 1000000);
+        } else {
+            croak("\"timeout\" should be a number or an integer");
+        }
+    }
+
     if ((val = hv_fetch(request, "early_retry", 11, 0))) {
         if (SvTRUE(*val)) {
             opts->retry |= RETRY_EARLY;
@@ -267,6 +307,14 @@ iproto_message_t *iprotoxs_hv_to_message(HV *request) {
     iproto_message_opts_t *opts = iproto_message_options(message);
     iprotoxs_parse_opts(opts, request);
 
+    if ((val = hv_fetch(request, "soft_retry_callback", 19, 0))) {
+        if (!(SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVCV))
+            croak("\"soft_retry_callback\" should be a CODEREF");
+        opts->soft_retry_callback = iprotoxs_soft_retry_callback;
+        dMY_CXT;
+        hv_store(MY_CXT.soft_retry_callbacks, (char *)message, sizeof(message), SvREFCNT_inc(*val), 0);
+    }
+
     return message;
 }
 
@@ -323,6 +371,7 @@ BOOT:
     MY_CXT_INIT;
     MY_CXT.singletons = newHV();
     MY_CXT.stat_callback = NULL;
+    MY_CXT.soft_retry_callbacks = newHV();
 
 MR::IProto::XS
 ixs_new(klass, ...)
@@ -413,6 +462,8 @@ ixs_bulk(iprotoxs, list)
         }
         sv_2mortal((SV*)RETVAL);
         Safefree(messages);
+        dMY_CXT;
+        hv_clear(MY_CXT.soft_retry_callbacks);
     OUTPUT:
         RETVAL
 
@@ -424,6 +475,8 @@ ixs_do(iprotoxs, request)
         iproto_message_t *message = iprotoxs_hv_to_message(request);
         iproto_do(iproto, message, NULL);
         RETVAL = (HV *)sv_2mortal((SV *)iprotoxs_message_to_hv(message, request));
+        dMY_CXT;
+        hv_clear(MY_CXT.soft_retry_callbacks);
     OUTPUT:
         RETVAL
 

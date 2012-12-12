@@ -17,8 +17,8 @@ MR::IProto::XS->set_stat_flush_interval(2);
 
 isa_ok(MR::IProto::XS->new(shards => {}), 'MR::IProto::XS');
 
-my $PORT = 40000;
-my $EMPTY_PORT = 19999;
+my $PORT = $ENV{FIRST_PORT} || 40000;
+my $EMPTY_PORT = $ENV{EMPTY_PORT} || 19999;
 
 {
     package Test::Smth;
@@ -31,6 +31,7 @@ check_errors();
 check_success();
 check_early_retry();
 check_retry();
+check_soft_retry();
 check_timeout();
 check_replica();
 check_priority();
@@ -83,7 +84,7 @@ sub fork_test_server {
         $socket->close();
         exit;
     }
-    sleep 1;
+    sleep 0.5;
     return $port;
 }
 
@@ -319,6 +320,41 @@ sub check_retry {
     }
 }
 
+sub check_soft_retry {
+    my $count = 0;
+    my $msg = {
+        code => 17,
+        request => { method => 'pack', format => 'L', data => [ 97 ] },
+        response => { method => 'unpack', format => 'L' },
+        soft_retry_callback => sub { $count++; my ($r) = unpack('L', $_[0]); $r == 12 },
+    };
+
+    {
+        my $port = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 12));
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
+        });
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $resp = $iproto->bulk([$msg]);
+        is_deeply($resp, [ { error => 'ok', data => [ 9 ] } ], "soft_retry - want");
+    }
+
+    {
+        my $port = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 13));
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
+        });
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $resp = $iproto->bulk([$msg]);
+        is_deeply($resp, [ { error => 'ok', data => [ 13 ] } ], "soft_retry - don't want");
+    }
+
+    is($count, 3, "soft_retry count");
+    return;
+}
+
 sub check_timeout {
     my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, from => 'master,replica', safe_retry => 0 };
 
@@ -352,6 +388,69 @@ sub check_timeout {
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "call timeout");
         is(sprintf('%.01f', time() - $start), '2.0', "call timeout time");
+    }
+
+    {
+        my $port = fork_test_server(sub { sleep 7 });
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        local $msg->{timeout} = 5;
+        my $start = time();
+        my $resp = $iproto->bulk([$msg, $msg, $msg]);
+        is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "message timeout more then call");
+        is(sprintf('%.01f', time() - $start), '5.0', "message timeout more then call time");
+    }
+
+    {
+        my $port = fork_test_server(map { sub { sleep 1 } } (1 .. 3));
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        local $msg->{timeout} = 0.8;
+        local $msg->{max_tries} = 3;
+        my $start = time();
+        my $resp = $iproto->bulk([$msg, $msg, $msg]);
+        is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "message timeout less then call");
+        is(sprintf('%.01f', time() - $start), '2.0', "message timeout less then call time");
+    }
+
+    {
+        my $port = fork_test_server(map { sub { sleep 1 } } (1 .. 3));
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        local $msg->{timeout} = 0.6;
+        local $msg->{max_tries} = 3;
+        my $start = time();
+        my $resp = $iproto->bulk([$msg, $msg, $msg]);
+        is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "message timeout more then server");
+        is(sprintf('%.01f', time() - $start), '1.8', "message timeout more then server time");
+    }
+
+    {
+        my $port = fork_test_server(map { sub { sleep 1 } } (1 .. 3));
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        local $msg->{timeout} = 0.3;
+        local $msg->{max_tries} = 3;
+        my $start = time();
+        my $resp = $iproto->bulk([$msg, $msg, $msg]);
+        is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "message timeout less then server");
+        is(sprintf('%.01f', time() - $start), '0.9', "message timeout less then server time");
+    }
+
+    {
+        my $port = fork_test_server(map { sub { sleep 1 } } (1 .. 3));
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        local $msg->{max_tries} = 3;
+        my $start = time();
+        my $resp = $iproto->bulk([$msg, $msg, { %$msg, timeout => 0.3 }]);
+        is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "message timeout less then server not all");
+        is(sprintf('%.01f', time() - $start), '1.5', "message timeout less then server not all time");
+    }
+
+    {
+        my $port = fork_test_server(map { sub { sleep 1 } } (1 .. 3));
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        local $msg->{max_tries} = 3;
+        my $start = time();
+        my $resp = $iproto->bulk([$msg, $msg, { %$msg, timeout => 0.6 }]);
+        is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "message timeout more then server not all");
+        is(sprintf('%.01f', time() - $start), '1.8', "message timeout more then server not all time");
     }
 }
 
@@ -494,6 +593,8 @@ sub check_leak {
     no_leaks_ok { check_success() } "success query not leaks";
     no_leaks_ok { check_early_retry() } "early retry not leaks";
     no_leaks_ok { check_retry() } "retry not leaks";
+    no_leaks_ok { check_soft_retry() } "soft retry not leaks";
+    no_leaks_ok { check_timeout() } "timeout not leaks";
     no_leaks_ok { check_replica() } "replica not leaks";
     no_leaks_ok { check_priority() } "priority not leaks";
     no_leaks_ok { check_pinger() } "pinger not leaks";
