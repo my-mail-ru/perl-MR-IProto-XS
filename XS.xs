@@ -204,7 +204,32 @@ void iprotoxs_parse_opts(iproto_message_opts_t *opts, HV *request) {
     }
 
     if ((val = hv_fetch(request, "early_retry", 11, 0))) {
-        opts->early_retry = SvTRUE(*val);
+        if (SvTRUE(*val)) {
+            opts->retry |= RETRY_EARLY;
+        } else {
+            opts->retry &= ~RETRY_EARLY;
+        }
+    }
+
+    if ((val = hv_fetch(request, "safe_retry", 10, 0))) {
+        if (SvTRUE(*val)) {
+            opts->retry |= RETRY_SAFE;
+        } else {
+            opts->retry &= ~RETRY_SAFE;
+        }
+    }
+
+    if ((val = hv_fetch(request, "retry_same", 10, 0))) {
+        if (SvTRUE(*val)) {
+            opts->retry |= RETRY_SAME;
+        } else {
+            opts->retry &= ~RETRY_SAME;
+        }
+    }
+
+    if ((val = hv_fetch(request, "max_tries", 9, 0))) {
+        if (!SvIOK(*val)) croak("\"max_tries\" should be an integer");
+        opts->max_tries = SvIV(*val);
     }
 }
 

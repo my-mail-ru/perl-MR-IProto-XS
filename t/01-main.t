@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 42;
+use Test::More tests => 52;
 use Test::LeakTrace;
 use IO::Socket;
 use Time::HiRes qw/sleep time/;
@@ -31,6 +31,7 @@ check_errors();
 check_success();
 check_early_retry();
 check_retry();
+check_timeout();
 check_replica();
 check_priority();
 check_pinger();
@@ -67,8 +68,6 @@ sub fork_test_server {
                     my $len = $accept->sysread(my $eof, 1);
                     if ($len == -1 ) {
                         warn "Failed to read EOF";
-                    } elsif ($len) {
-                        warn "Extra data found";
                     }
                     $accept->close();
                     exit;
@@ -84,7 +83,7 @@ sub fork_test_server {
         $socket->close();
         exit;
     }
-    sleep 0.1;
+    sleep 1;
     return $port;
 }
 
@@ -230,7 +229,7 @@ sub check_early_retry {
         my $start = time();
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "early retry with no servers");
-        cmp_ok(time() - $start, '>',  1.9, "early retry with no servers time");
+        cmp_ok(time() - $start, '>',  0.19, "early retry with no servers time");
     }
 
     {
@@ -254,22 +253,110 @@ sub check_early_retry {
 }
 
 sub check_retry {
-    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, from => 'master,replica' };
+    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, from => 'master,replica', safe_retry => 0 };
 
     {
-        my $next;
         my $port = fork_test_server(sub {}, sub {
             my ($socket) = @_;
             check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
         });
         my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk([$msg]);
-        is_deeply($resp, [ { error => 'ok', data => [ 9 ] } ], "retry from same server");
+        is_deeply($resp, [ { error => 'ok', data => [ 9 ] } ], "retry when only one server allowed");
+    }
+
+    {
+        local $msg->{retry_same} = 1;
+        my $port1 = fork_test_server(sub { sleep 1 }, sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 1));
+        });
+        my $port2 = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 2));
+        });
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port1", "127.0.0.1:$port2"]);
+        my $resp = $iproto->do($msg);
+        is_deeply($resp, { error => 'ok', data => [ 1 ] }, "retry from the same server");
+    }
+
+    {
+        local $msg->{retry_same} = 0;
+        my $port1 = fork_test_server(sub { sleep 1 }, sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 1));
+        });
+        my $port2 = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 2));
+        });
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port1", "127.0.0.1:$port2"]);
+        my $resp = $iproto->do($msg);
+        is_deeply($resp, { error => 'ok', data => [ 2 ] }, "retry from another server");
+    }
+
+    {
+        local $msg->{safe_retry} = 1;
+        my $port1 = fork_test_server(sub { sleep 1 });
+        my $port2 = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 2));
+        });
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port1", "127.0.0.1:$port2"]);
+        my $resp = $iproto->do($msg);
+        is_deeply($resp, { error => 'timeout' }, "safe retry - is unsafe");
+    }
+
+    {
+        local $msg->{safe_retry} = 1;
+        my $port = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 2));
+        });
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$EMPTY_PORT", "127.0.0.1:$port"]);
+        my $resp = $iproto->do($msg);
+        is_deeply($resp, { error => 'ok', data => [ 2 ] }, "safe retry - is safe");
+    }
+}
+
+sub check_timeout {
+    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, from => 'master,replica', safe_retry => 0 };
+
+    {
+        my $port = fork_test_server(sub {
+            sleep 2;
+        });
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        local $msg->{max_tries} = 1;
+        my $start = time();
+        my $resp = $iproto->bulk([$msg, $msg, $msg]);
+        is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "server timeout");
+        is(sprintf('%.01f', time() - $start), '0.5', "server timeout time");
+    }
+
+    {
+        my $port = fork_test_server(map { sub { sleep 1 } } (1 .. 3));
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        local $msg->{max_tries} = 3;
+        my $start = time();
+        my $resp = $iproto->bulk([$msg, $msg, $msg]);
+        is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "server timeout with 3 tries");
+        is(sprintf('%.01f', time() - $start), '1.5', "server timeout with 3 tries time");
+    }
+
+    {
+        my $port = fork_test_server(map { sub { sleep 1 } } (1 .. 10));
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        local $msg->{max_tries} = 10;
+        my $start = time();
+        my $resp = $iproto->bulk([$msg, $msg, $msg]);
+        is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "call timeout");
+        is(sprintf('%.01f', time() - $start), '2.0', "call timeout time");
     }
 }
 
 sub check_replica {
-    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, from => 'master,replica' };
+    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, from => 'master,replica', safe_retry => 0 };
 
     {
         my $port1 = fork_test_server(sub {
@@ -288,7 +375,7 @@ sub check_replica {
 }
 
 sub check_priority {
-    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' } };
+    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, safe_retry => 0 };
 
     {
         my $port1 = fork_test_server(sub {
