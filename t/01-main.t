@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 52;
+use Test::More tests => 69;
 use Test::LeakTrace;
 use IO::Socket;
 use Time::HiRes qw/sleep time/;
@@ -182,7 +182,7 @@ sub check_errors {
 }
 
 sub check_success {
-    my $msg = { code => 17, request => { method => 'pack', format => 'Lw/a*L', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L' } };
+    my $msg = { code => 17, request => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L*' } };
 
     {
         my $port = fork_test_server(sub {

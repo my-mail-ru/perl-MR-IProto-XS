@@ -179,12 +179,11 @@ char *iprotoxs_pack_data(HV *opts, STRLEN *length) {
     if (!(SvROK(*sv) && SvTYPE(SvRV(*sv)) == SVt_PVAV))
         croak("\"data\" should be an ARRAYREF if method \"pack\" is used");
     AV *data = (AV *)SvRV(*sv);
-    size_t size = av_len(data) + 1;
-    size_t listsize = size * sizeof(SV *);
     SV **list = av_fetch(data, 0, 0);
+    size_t listlen = av_len(data) + 1;
     SV *cat = sv_2mortal(newSVpv("", 0));
     SvUTF8_off(cat);
-    packlist(cat, format, format + formatlen, list, list + listsize);
+    packlist(cat, format, format + formatlen, list, list + listlen);
     return SvPV(cat, (*length));
 }
 
