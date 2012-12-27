@@ -49,7 +49,7 @@ static void iprotoxs_stat_callback(const char *type, const char *server, uint32_
 
 static bool iprotoxs_soft_retry_callback(iproto_message_t *message) {
     dMY_CXT;
-    SV **val = hv_fetch(MY_CXT.soft_retry_callbacks, (char *)message, sizeof(message), 0);
+    SV **val = hv_fetch(MY_CXT.soft_retry_callbacks, (char *)&message, sizeof(message), 0);
     if (!val) return false;
     SV *callback = SvRV(*val);
     size_t size;
@@ -143,7 +143,7 @@ static void iprotoxs_shard_set(iproto_shard_t *shard, HV *config) {
     if (replicas) iprotoxs_servers_set(shard, 1, replicas);
 }
 
-static void iprotoxs_set_shards(iproto_t *iproto, HV *config) {
+static void iprotoxs_cluster_set_shards(iproto_cluster_t *cluster, HV *config) {
     char *key;
     SV *val;
     I32 keylen;
@@ -162,7 +162,7 @@ static void iprotoxs_set_shards(iproto_t *iproto, HV *config) {
                 croak("Shard configuration should be a HASHREF");
             iproto_shard_t *shard = iproto_shard_init();
             iprotoxs_shard_set(shard, (HV*)SvRV(*val));
-            iproto_add_shard(iproto, shard);
+            iproto_cluster_add_shard(cluster, shard);
         } else {
             croak("Shard no %s not found in configuration", key);
         }
@@ -205,6 +205,19 @@ AV *iprotoxs_unpack_data(HV *opts, char *data, STRLEN length) {
     return result;
 }
 
+void iprotoxs_timeval_set(SV *sv, struct timeval *timeout) {
+    if (SvIOK(sv)) {
+        timeout->tv_sec = SvIV(sv);
+        timeout->tv_usec = 0;
+    } else if (SvNOK(sv)) {
+        NV to = SvNV(sv);
+        timeout->tv_sec = floor(to);
+        timeout->tv_usec = floor((to - timeout->tv_sec) * 1000000);
+    } else {
+        croak("\"timeout\" should be a number or an integer");
+    }
+}
+
 void iprotoxs_parse_opts(iproto_message_opts_t *opts, HV *request) {
     SV **val;
 
@@ -230,16 +243,7 @@ void iprotoxs_parse_opts(iproto_message_opts_t *opts, HV *request) {
     }
 
     if ((val = hv_fetch(request, "timeout", 7, 0))) {
-        if (SvIOK(*val)) {
-            opts->timeout.tv_sec = SvIV(*val);
-            opts->timeout.tv_usec = 0;
-        } else if (SvNOK(*val)) {
-            NV timeout = SvNV(*val);
-            opts->timeout.tv_sec = floor(timeout);
-            opts->timeout.tv_usec = floor((timeout - opts->timeout.tv_sec) * 1000000);
-        } else {
-            croak("\"timeout\" should be a number or an integer");
-        }
+        iprotoxs_timeval_set(*val, &opts->timeout);
     }
 
     if ((val = hv_fetch(request, "early_retry", 11, 0))) {
@@ -311,7 +315,7 @@ iproto_message_t *iprotoxs_hv_to_message(HV *request) {
             croak("\"soft_retry_callback\" should be a CODEREF");
         opts->soft_retry_callback = iprotoxs_soft_retry_callback;
         dMY_CXT;
-        hv_store(MY_CXT.soft_retry_callbacks, (char *)message, sizeof(message), SvREFCNT_inc(*val), 0);
+        hv_store(MY_CXT.soft_retry_callbacks, (char *)&message, sizeof(message), SvREFCNT_inc(*val), 0);
     }
 
     return message;
@@ -409,10 +413,10 @@ ixs_new(klass, ...)
         }
         if (!shards_config)
             croak("Argument \"shards\" or \"masters\" should be specified");
-        iproto_t *iproto = iproto_init();
-        iprotoxs_set_shards(iproto, shards_config);
+        iproto_cluster_t *cluster = iproto_cluster_init();
+        iprotoxs_cluster_set_shards(cluster, shards_config);
         RETVAL = newSV(0);
-        sv_setref_pv(RETVAL, SvPV_nolen(klass), iproto);
+        sv_setref_pv(RETVAL, SvPV_nolen(klass), cluster);
         if (ix == 1) {
             dMY_CXT;
             if (hv_exists_ent(MY_CXT.singletons, klass, 0))
@@ -428,7 +432,7 @@ ixs_DESTROY(iprotoxs)
     CODE:
         if (singleton_call)
             croak("DESTROY is called as a class method");
-        iproto_free(iproto);
+        iproto_cluster_free(cluster);
 
 MR::IProto::XS
 ixs_remove_singleton(klass)
@@ -440,10 +444,11 @@ ixs_remove_singleton(klass)
         RETVAL
 
 AV *
-ixs_bulk(iprotoxs, list)
+ixs_bulk(iprotoxs, list, ...)
         MR::IProto::XS iprotoxs
         AV *list
     CODE:
+        iprotoxs_call_timeout(timeout, 2);
         int nmessages = av_len(list) + 1;
         iproto_message_t **messages;
         Newx(messages, nmessages, iproto_message_t *);
@@ -453,7 +458,7 @@ ixs_bulk(iprotoxs, list)
                 croak("Messages should be HASH references");
             messages[i] = iprotoxs_hv_to_message((HV *)SvRV(*sv));
         }
-        iproto_bulk(iproto, messages, nmessages, NULL);
+        iproto_cluster_bulk(cluster, messages, nmessages, timeout);
         RETVAL = newAV();
         for (int i = 0; i < nmessages; i++) {
             SV **sv = av_fetch(list, i, 0);
@@ -467,12 +472,13 @@ ixs_bulk(iprotoxs, list)
         RETVAL
 
 HV *
-ixs_do(iprotoxs, request)
+ixs_do(iprotoxs, request, ...)
         MR::IProto::XS iprotoxs
         HV *request
     CODE:
+        iprotoxs_call_timeout(timeout, 2);
         iproto_message_t *message = iprotoxs_hv_to_message(request);
-        iproto_do(iproto, message, NULL);
+        iproto_cluster_do(cluster, message, timeout);
         RETVAL = (HV *)sv_2mortal((SV *)iprotoxs_message_to_hv(message, request));
         dMY_CXT;
         hv_clear(MY_CXT.soft_retry_callbacks);

@@ -4,7 +4,7 @@ MR::IProto::XS  T_PTROBJ_IP
 INPUT
 T_PTROBJ_IP
     bool singleton_call;
-    iproto_t *${ $var eq q/iprotoxs/ ? \q/iproto/ : \qq/${var}x/ };
+    iproto_cluster_t *${ $var eq q/iprotoxs/ ? \q/cluster/ : \qq/${var}x/ };
     if (sv_derived_from($arg, \"${ntype}\")) {
         if (SvPOK($arg)) {
             dMY_CXT;
@@ -17,7 +17,7 @@ T_PTROBJ_IP
             $var = $arg;
             singleton_call = false;
         }
-        ${ $var eq q/iprotoxs/ ? \q/iproto/ : \qq/${var}x/ } = INT2PTR(iproto_t *, SvIV((SV*)SvRV($var)));
+        ${ $var eq q/iprotoxs/ ? \q/cluster/ : \qq/${var}x/ } = INT2PTR(iproto_cluster_t *, SvIV((SV*)SvRV($var)));
     } else
         Perl_croak(aTHX_ \"$var is not of type ${ntype}\")
 
