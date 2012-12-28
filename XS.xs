@@ -326,7 +326,8 @@ HV *iprotoxs_message_to_hv(iproto_message_t *message, HV *request) {
     SV *errsv = newSVuv(error);
     sv_setpv(errsv, iproto_error_string(error));
     SvIOK_on(errsv);
-    HV *result = newHV();
+    SV **val = hv_fetch(request, "inplace", 7, 0);
+    HV *result = val && SvTRUE(*val) ? (HV *)SvREFCNT_inc((SV *)request) : newHV();
     if (error == ERR_CODE_OK) {
         bool replica;
         size_t size;

@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 66;
+use Test::More tests => 68;
 use Test::LeakTrace;
 use IO::Socket;
 use Time::HiRes qw/sleep time/;
@@ -220,6 +220,17 @@ sub check_success {
     }
 
     {
+        my $msg = { code => 17, request => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L*' }, inplace => 1 };
+        my $port = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 23);
+        });
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $resp = $iproto->bulk([ map {{ %$msg }} (11 .. 23)]);
+        is_deeply($resp, [ map {{ %$msg, error => "ok", data => [ 'test', $_ ] }} (11 .. 23) ], "inplace request");
+    }
+
+    {
         my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 1 ] }, response => { method => 'unpack', format => 'L' } };
         my $port = fork_test_server(sub { echo(@_) for (5, 6) });
         my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
@@ -339,6 +350,18 @@ sub check_retry {
         my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$EMPTY_PORT", "127.0.0.1:$port"]);
         my $resp = $iproto->do($msg);
         is_deeply($resp, { error => 'ok', data => [ 2 ] }, "safe retry - is safe");
+    }
+
+    {
+        local $msg->{retry_same} = 1;
+        local $msg->{safe_retry} = 1;
+        my $port = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 2));
+        });
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$EMPTY_PORT", "127.0.0.1:$port"]);
+        my $resp = $iproto->do($msg);
+        is_deeply($resp, { error => 'ok', data => [ 2 ] }, "safe retry from the same server goes to another");
     }
 }
 
