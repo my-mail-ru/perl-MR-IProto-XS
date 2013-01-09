@@ -209,7 +209,7 @@ void iprotoxs_timeval_set(SV *sv, struct timeval *timeout) {
     if (SvIOK(sv)) {
         timeout->tv_sec = SvIV(sv);
         timeout->tv_usec = 0;
-    } else if (SvNOK(sv)) {
+    } else if (SvNOK(sv) || looks_like_number(sv)) {
         NV to = SvNV(sv);
         timeout->tv_sec = floor(to);
         timeout->tv_usec = floor((to - timeout->tv_sec) * 1000000);
@@ -222,7 +222,8 @@ void iprotoxs_parse_opts(iproto_message_opts_t *opts, HV *request) {
     SV **val;
 
     if ((val = hv_fetch(request, "shard_num", 9, 0))) {
-        if (!SvIOK(*val)) croak("Invalid \"shard_num\" value: \"%s\"", SvPV_nolen(*val));
+        if (!(SvIOK(*val) || looks_like_number(*val)))
+            croak("Invalid \"shard_num\" value: \"%s\"", SvPV_nolen(*val));
         opts->shard_num = SvUV(*val);
     }
 
@@ -271,7 +272,8 @@ void iprotoxs_parse_opts(iproto_message_opts_t *opts, HV *request) {
     }
 
     if ((val = hv_fetch(request, "max_tries", 9, 0))) {
-        if (!SvIOK(*val)) croak("\"max_tries\" should be an integer");
+        if (!(SvIOK(*val) || looks_like_number(*val)))
+            croak("\"max_tries\" should be an integer");
         opts->max_tries = SvIV(*val);
     }
 }
@@ -284,7 +286,8 @@ iproto_message_t *iprotoxs_hv_to_message(HV *request) {
 
     val = hv_fetch(request, "code", 4, 0);
     if (!val) croak("\"code\" should be specified");
-    if (!SvIOK(*val)) croak("Invalid \"code\" value");
+    if (!(SvIOK(*val) || looks_like_number(*val)))
+        croak("Invalid \"code\" value");
     code = SvUV(*val);
 
     val = hv_fetch(request, "request", 7, 0);
