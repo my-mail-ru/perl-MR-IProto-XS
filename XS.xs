@@ -495,10 +495,12 @@ ixs_set_logmask(klass, mask)
     CODE:
         iproto_set_logmask(mask);
 
+MODULE = MR::IProto::XS		PACKAGE = MR::IProto::XS::Stat		PREFIX = ixs_stat_
+
 #ifdef WITH_GRAPHITE
 
 bool
-ixs_set_graphite(klass, host, port, prefix)
+ixs_stat_set_graphite(klass, host, port, prefix)
         char *host
         short port
         char *prefix
@@ -510,13 +512,13 @@ ixs_set_graphite(klass, host, port, prefix)
 #endif
 
 void
-ixs_set_stat_flush_interval(klass, interval)
+ixs_stat_set_flush_interval(klass, interval)
         time_t interval
     CODE:
         iproto_stat_set_flush_interval(interval);
 
 void
-ixs_set_stat_callback(klass, callback)
+ixs_stat_set_callback(klass, callback)
         SV *callback
     CODE:
         dMY_CXT;
@@ -530,3 +532,13 @@ ixs_set_stat_callback(klass, callback)
         } else {
             SvSetSV(MY_CXT.stat_callback, callback);
         }
+
+void
+ixs_stat_flush(klass)
+    CODE:
+        iproto_stat_flush();
+
+void
+ixs_stat_END()
+    CODE:
+        iproto_stat_flush();
