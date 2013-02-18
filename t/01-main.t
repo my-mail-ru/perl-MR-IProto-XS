@@ -12,7 +12,7 @@ use IPC::SharedMem;
 BEGIN { use_ok('MR::IProto::XS') };
 
 MR::IProto::XS->set_logmask(MR::IProto::XS::LOG_NOTHING);
-ok(MR::IProto::XS->set_graphite("alei9.mail.ru", 2005, "my.iproto-xs"), "set_graphite") or diag($!);
+ok(MR::IProto::XS::Stat->set_graphite("alei9.mail.ru", 2005, "my.iproto-xs"), "set_graphite") or diag($!);
 
 isa_ok(MR::IProto::XS->new(shards => {}), 'MR::IProto::XS');
 
@@ -618,7 +618,7 @@ sub check_fork {
 
 sub check_stat {
     my @stat;
-    MR::IProto::XS->set_stat_callback(sub { @stat = @_; return });
+    MR::IProto::XS::Stat->set_callback(sub { @stat = @_; return });
     my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] } };
     my $port = fork_test_server(sub {
         my ($socket) = @_;
