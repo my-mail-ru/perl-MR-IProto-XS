@@ -569,10 +569,10 @@ sub check_pinger {
             check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
         });
 
+        sleep 1;
         my $pinger_string = "lwp:xxx,iproto:127.0.0.1:$port1,iproto:127.0.0.1:29998\0";
         my $share = IPC::SharedMem->new(MR::Pinger::Const::SHM_KEY_FALL(), MR::Pinger::Const::SHM_SIZE(), 0666|IPC_CREAT) or die "Failed to create pinger shared memory";
         $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
-        sleep 1;
 
         my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
         my $resp = $iproto->bulk([$msg]);
