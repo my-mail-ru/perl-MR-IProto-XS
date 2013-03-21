@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 69;
+use Test::More tests => 70;
 use Test::LeakTrace;
 use IO::Socket;
 use Time::HiRes qw/sleep time/;
@@ -212,6 +212,29 @@ sub check_errors {
         my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ map {{ error => "timeout" }} (1 .. 3) ], "send/recv timeout");
+    }
+
+    {
+        my $port = fork_test_server(sub {
+            my ($socket) = @_;
+            echo(@_);
+            my $header;
+            my $len = $socket->sysread($header, 12);
+            die "Failed to read: $!" if $len == -1;
+            die "EOF" if $len == 0;
+            die "Invalid header length" unless $len == 12;
+            my ($code, $length, $sync) = unpack 'LLL', $header;
+            my $data;
+            $len = $socket->sysread($data, $length);
+            die "Failed to read: $!" if $len == -1;
+            $len = $socket->syswrite(pack 'LLLa*', $code, length $data, $sync + 1234, $data);
+            die "Failed to write: $!" if $len == -1;
+            echo(@_);
+            return;
+        });
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $resp = $iproto->bulk([$msg, $msg, $msg]);
+        is_deeply($resp, [ { error => 'ok', data => pack('L', 0x01020304) }, map {{ error => 'protocol error' }} (1, 2) ], "invalid sync");
     }
 
     close_all_servers();
