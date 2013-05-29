@@ -374,7 +374,8 @@ HV *iprotoxs_message_to_hv(iproto_message_t *message, HV *request) {
     sv_setpv(errsv, iproto_error_string(error));
     SvIOK_on(errsv);
     SV **val = hv_fetch(request, "inplace", 7, 0);
-    HV *result = val && SvTRUE(*val) ? (HV *)SvREFCNT_inc((SV *)request) : newHV();
+    bool inplace = val && SvTRUE(*val);
+    HV *result = newHV();
     if (error == ERR_CODE_OK) {
         bool replica;
         size_t size;
@@ -397,13 +398,19 @@ HV *iprotoxs_message_to_hv(iproto_message_t *message, HV *request) {
             } else {
                 croak("invalid \"method\" value");
             }
+            if (inplace && datasv)
+                hv_store(hv, "data", 4, SvREFCNT_inc(datasv), 0);
         } else {
             datasv = newSVpvn(data, size);
+            if (inplace)
+                hv_store(request, "response", 8, SvREFCNT_inc(datasv), 0);
         }
         if (datasv)
             hv_store(result, "data", 4, datasv, 0);
     }
     hv_store(result, "error", 5, errsv, 0);
+    if (inplace)
+        hv_store(request, "error", 5, SvREFCNT_inc(errsv), 0);
     iproto_message_free(message);
     return result;
 }

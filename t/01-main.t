@@ -260,8 +260,19 @@ sub check_success {
             check_and_reply($socket, 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 23);
         });
         my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
-        my $resp = $iproto->bulk([ map {{ %$msg }} (11 .. 23)]);
-        is_deeply($resp, [ map {{ %$msg, error => "ok", data => [ 'test', $_ ] }} (11 .. 23) ], "inplace request");
+        my $resp = $iproto->bulk(my $req = [ map {{
+                code     => 17,
+                request  => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] },
+                response => { method => 'unpack', format => 'w/a*L*' },
+                inplace  => 1,
+            }} (11 .. 23)]);
+        is_deeply($req, [ map {{
+                code     => 17,
+                request  => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] },
+                response => { method => 'unpack', format => 'w/a*L*', data => [ 'test', $_ ] },
+                inplace  => 1,
+                error    => "ok",
+            }} (11 .. 23) ], "inplace request");
     }
 
     {
