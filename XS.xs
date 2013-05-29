@@ -13,6 +13,7 @@ typedef struct {
     HV *singletons;
     SV *stat_callback;
     HV *soft_retry_callbacks;
+    CV *unpack;
 } my_cxt_t;
 
 START_MY_CXT;
@@ -169,6 +170,22 @@ static void iprotoxs_cluster_set_shards(iproto_cluster_t *cluster, HV *config) {
     }
 }
 
+static XS(iprotoxs_unpack_wrapper) {
+    dXSARGS;
+    SP -= items;
+    SV* pattern = ST(0);
+    SV* string = ST(1);
+    STRLEN plen;
+    STRLEN slen;
+    const char *pat = SvPV_const(pattern,  plen);
+    const char *s   = SvPV_const(string, slen);
+    const char *strend = s + slen;
+    const char *patend = pat + plen;
+    PUTBACK;
+    unpackstring((char *)pat, (char *)patend, (char *)s, (char *)strend, 0);
+    return;
+}
+
 char *iprotoxs_pack_data(HV *opts, STRLEN *length) {
     SV **sv = hv_fetch(opts, "format", 6, 0);
     if (!(sv && SvPOK(*sv)))
@@ -187,19 +204,46 @@ char *iprotoxs_pack_data(HV *opts, STRLEN *length) {
     return SvPV(cat, (*length));
 }
 
-AV *iprotoxs_unpack_data(HV *opts, char *data, STRLEN length) {
+AV *iprotoxs_unpack_data(HV *opts, char *data, STRLEN length, SV *errsv) {
     SV **sv = hv_fetch(opts, "format", 6, 0);
     if (!(sv && SvPOK(*sv)))
         croak("\"format\" should be a SCALAR if method \"unpack\" is used");
-    size_t formatlen;
-    char *format = SvPV(*sv, formatlen);
+    /* We should use G_EVAL, so can't use unpackstring() function directly */
+    SV *format = *sv;
+    if (data == NULL && SvCUR(format) != 0) {
+        sv_setuv(errsv, ERR_CODE_PROTO_ERR);
+        sv_setpvf(errsv, "Response data is empty, should be '%s'", SvPV_nolen(format));
+        SvIOK_on(errsv);
+        return NULL;
+    }
     dSP;
+    dMY_CXT;
     ENTER;
     SAVETMPS;
+    PUSHMARK(SP);
+    XPUSHs(format);
+    XPUSHs(sv_2mortal(newSVpvn(data, length)));
     PUTBACK;
-    I32 cnt = unpackstring(format, format + formatlen, data, data + length, 0);
+    I32 cnt = call_sv((SV *)MY_CXT.unpack, G_ARRAY | G_EVAL);
     SPAGAIN;
-    AV *result = av_make(cnt, SP - cnt + 1);
+    AV *result;
+    if (SvTRUE(ERRSV)) {
+        result = NULL;
+        STRLEN errlen;
+        char *err = SvPV(ERRSV, errlen);
+        char *last = NULL;
+        char *at = err;
+        while ((at = strstr(at + 1, " at ")))
+            last = at;
+        if (last)
+            errlen = last - err;
+        sv_setuv(errsv, ERR_CODE_PROTO_ERR);
+        sv_setpv(errsv, "Failed to unpack response data: ");
+        sv_catpvn(errsv, err, errlen);
+        SvIOK_on(errsv);
+    } else {
+        result = av_make(cnt, SP - cnt + 1);
+    }
     FREETMPS;
     LEAVE;
     return result;
@@ -348,14 +392,16 @@ HV *iprotoxs_message_to_hv(iproto_message_t *message, HV *request) {
             if (!SvPOK(*sv)) croak("\"method\" should be SCALAR");
             char *method = SvPV_nolen(*sv);
             if (strcmp(method, "unpack") == 0) {
-                datasv = newRV_noinc((SV *)iprotoxs_unpack_data(hv, data, size));
+                AV *dataav = iprotoxs_unpack_data(hv, data, size, errsv);
+                datasv = dataav ? newRV_noinc((SV *)dataav) : NULL;
             } else {
                 croak("invalid \"method\" value");
             }
         } else {
             datasv = newSVpvn(data, size);
         }
-        hv_store(result, "data", 4, datasv, 0);
+        if (datasv)
+            hv_store(result, "data", 4, datasv, 0);
     }
     hv_store(result, "error", 5, errsv, 0);
     iproto_message_free(message);
@@ -379,6 +425,7 @@ BOOT:
     MY_CXT.singletons = newHV();
     MY_CXT.stat_callback = NULL;
     MY_CXT.soft_retry_callbacks = newHV();
+    MY_CXT.unpack = newXSproto_portable(NULL, iprotoxs_unpack_wrapper, __FILE__, "$$");
 
 MR::IProto::XS
 ixs_new(klass, ...)
