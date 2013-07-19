@@ -423,9 +423,7 @@ BOOT:
     iproto_initialize();
     HV *stash = gv_stashpv("MR::IProto::XS", 1);
 #define IPROTOXS_CONST(s, ...) newCONSTSUB(stash, #s, newSVuv(s));
-    IPROTOXS_CONST(ERR_CODE_OK);
-    LIBIPROTO_ERROR_CODES(IPROTOXS_CONST);
-    IPROTO_ERROR_CODES(IPROTOXS_CONST);
+    IPROTO_ALL_ERROR_CODES(IPROTOXS_CONST);
     IPROTO_LOGMASK(IPROTOXS_CONST);
 #undef IPROTOXS_CONST
     MY_CXT_INIT;
@@ -540,6 +538,14 @@ ixs_do(iprotoxs, request, ...)
         RETVAL = (HV *)sv_2mortal((SV *)iprotoxs_message_to_hv(message, request));
         dMY_CXT;
         hv_clear(MY_CXT.soft_retry_callbacks);
+    OUTPUT:
+        RETVAL
+
+IV
+ixs_get_shard_count(iprotoxs)
+        MR::IProto::XS iprotoxs
+    CODE:
+        RETVAL = iproto_cluster_get_shard_count(cluster);
     OUTPUT:
         RETVAL
 

@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 70;
+use Test::More tests => 72;
 use Test::LeakTrace;
 use IO::Socket;
 use Time::HiRes qw/sleep time/;
@@ -154,6 +154,7 @@ sub check_new {
         masters  => ['10.0.0.1:1000', '10.0.0.2:2000'],
         replicas => ['10.0.1.1:1001', '10.0.1.2:2001'],
     );
+    is($iproto->get_shard_count(), 1, "one shard");
 
     $iproto = MR::IProto::XS->new(
         shards => {
@@ -162,6 +163,7 @@ sub check_new {
             3 => { masters => ['10.0.2.3:2002'], replicas => ['10.0.3.3:2003'] },
         },
     );
+    is($iproto->get_shard_count(), 3, "three shards");
 
     $iproto = MR::IProto::XS->new(
         masters  => [['10.0.0.1:1000', '10.0.0.2:2000'], ['10.0.0.3:3000', '10.0.0.4:4000']],
