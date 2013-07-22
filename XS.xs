@@ -33,9 +33,9 @@ static void iprotoxs_stat_callback(const char *type, const char *server, uint32_
     SvIOK_on(errsv);
     mXPUSHs(errsv);
     HV *datahv = newHV();
-    hv_store(datahv, "registered", 10, newSViv(data->registered), 0);
-    hv_store(datahv, "wallclock", 9, newSVnv(data->wallclock.tv_sec + (data->wallclock.tv_usec / 1000000.)), 0);
-    hv_store(datahv, "count", 5, newSVuv(data->count), 0);
+    (void)hv_store(datahv, "registered", 10, newSViv(data->registered), 0);
+    (void)hv_store(datahv, "wallclock", 9, newSVnv(data->wallclock.tv_sec + (data->wallclock.tv_usec / 1000000.)), 0);
+    (void)hv_store(datahv, "count", 5, newSVuv(data->count), 0);
     mXPUSHs(newRV_noinc((SV *)datahv));
     PUTBACK;
     dMY_CXT;
@@ -362,7 +362,7 @@ iproto_message_t *iprotoxs_hv_to_message(HV *request) {
             croak("\"soft_retry_callback\" should be a CODEREF");
         opts->soft_retry_callback = iprotoxs_soft_retry_callback;
         dMY_CXT;
-        hv_store(MY_CXT.soft_retry_callbacks, (char *)&message, sizeof(message), SvREFCNT_inc(*val), 0);
+        (void)hv_store(MY_CXT.soft_retry_callbacks, (char *)&message, sizeof(message), SvREFCNT_inc(*val), 0);
     }
 
     return message;
@@ -381,7 +381,7 @@ HV *iprotoxs_message_to_hv(iproto_message_t *message, HV *request) {
         size_t size;
         void *data = iproto_message_response(message, &size, &replica);
         if (replica)
-            hv_store(result, "replica", 7, &PL_sv_yes, 0);
+            (void)hv_store(result, "replica", 7, &PL_sv_yes, 0);
 
         SV *datasv;
         SV **val;
@@ -398,19 +398,25 @@ HV *iprotoxs_message_to_hv(iproto_message_t *message, HV *request) {
             } else {
                 croak("invalid \"method\" value");
             }
-            if (inplace && datasv)
-                hv_store(hv, "data", 4, SvREFCNT_inc(datasv), 0);
+            if (inplace && datasv) {
+                if (hv_store(hv, "data", 4, datasv, 0))
+                    SvREFCNT_inc(datasv);
+            }
         } else {
             datasv = newSVpvn(data, size);
-            if (inplace)
-                hv_store(request, "response", 8, SvREFCNT_inc(datasv), 0);
+            if (inplace) {
+                if (hv_store(request, "response", 8, datasv, 0))
+                    SvREFCNT_inc(datasv);
+            }
         }
         if (datasv)
-            hv_store(result, "data", 4, datasv, 0);
+            (void)hv_store(result, "data", 4, datasv, 0);
     }
-    hv_store(result, "error", 5, errsv, 0);
-    if (inplace)
-        hv_store(request, "error", 5, SvREFCNT_inc(errsv), 0);
+    (void)hv_store(result, "error", 5, errsv, 0);
+    if (inplace) {
+        if (hv_store(request, "error", 5, errsv, 0))
+            SvREFCNT_inc(errsv);
+    }
     iproto_message_free(message);
     return result;
 }
@@ -457,14 +463,14 @@ ixs_new(klass, ...)
                 if (!shards_config) {
                     HV *shard_config = newHV();
                     shards_config = (HV *)sv_2mortal((SV *)newHV());
-                    hv_store(shards_config, "1", 1, newRV_noinc((SV*)shard_config), 0);
+                    (void)hv_store(shards_config, "1", 1, newRV_noinc((SV*)shard_config), 0);
                     implicit_shard = true;
                 } else if (!implicit_shard) {
                     croak("Only one argument \"shards\" or \"%s\" could be specified", key);
                 }
                 elem = hv_fetch(shards_config, "1", 1, 0);
                 if (!elem) croak("Impossible");
-                hv_store((HV*)SvRV(*elem), key, strlen(key), SvREFCNT_inc(value), 0);
+                (void)hv_store((HV*)SvRV(*elem), key, strlen(key), SvREFCNT_inc(value), 0);
             }
         }
         if (!shards_config)
@@ -477,7 +483,7 @@ ixs_new(klass, ...)
             dMY_CXT;
             if (hv_exists_ent(MY_CXT.singletons, klass, 0))
                 croak("singleton %s already initialized", SvPV_nolen(klass));
-            hv_store_ent(MY_CXT.singletons, klass, SvREFCNT_inc(RETVAL), 0);
+            (void)hv_store_ent(MY_CXT.singletons, klass, SvREFCNT_inc(RETVAL), 0);
         }
     OUTPUT:
         RETVAL
