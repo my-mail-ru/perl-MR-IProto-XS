@@ -324,16 +324,21 @@ void iprotoxs_parse_opts(iproto_message_opts_t *opts, HV *request) {
 
 iproto_message_t *iprotoxs_hv_to_message(HV *request) {
     SV **val;
-    uint32_t code;
-    void *data;
-    size_t size;
+
+    val = hv_fetch(request, "iproto", 6, 0);
+    if (!val) croak("\"iproto\" should be specified");
+    if (!sv_derived_from(*val, "MR::IProto::XS"))
+        croak("\"iproto\" is not of type MR::IProto::XS");
+    iproto_cluster_t *cluster = iprotoxs_object_to_cluster(*val);
 
     val = hv_fetch(request, "code", 4, 0);
     if (!val) croak("\"code\" should be specified");
     if (!(SvIOK(*val) || looks_like_number(*val)))
         croak("Invalid \"code\" value");
-    code = SvUV(*val);
+    uint32_t code = SvUV(*val);
 
+    void *data;
+    size_t size;
     val = hv_fetch(request, "request", 7, 0);
     if (!val) croak("\"request\" should be specified");
     if (SvPOK(*val)) {
@@ -354,6 +359,7 @@ iproto_message_t *iprotoxs_hv_to_message(HV *request) {
     }
 
     iproto_message_t *message = iproto_message_init(code, data, size);
+    iproto_message_set_cluster(message, cluster);
     iproto_message_opts_t *opts = iproto_message_options(message);
     iprotoxs_parse_opts(opts, request);
 
@@ -436,7 +442,7 @@ BOOT:
     MY_CXT.singletons = newHV();
     MY_CXT.stat_callback = NULL;
     MY_CXT.soft_retry_callbacks = newHV();
-    MY_CXT.unpack = newXSproto_portable(NULL, iprotoxs_unpack_wrapper, __FILE__, "$$");
+    MY_CXT.unpack = newXS(NULL, iprotoxs_unpack_wrapper, __FILE__);
 
 MR::IProto::XS
 ixs_new(klass, ...)
@@ -492,16 +498,32 @@ void
 ixs_DESTROY(iprotoxs)
         MR::IProto::XS iprotoxs
     CODE:
-        if (singleton_call)
-            croak("DESTROY is called as a class method");
+        if (!iprotoxs)
+            croak("DESTROY should be called as an instance method");
+        iproto_cluster_t *cluster = iprotoxs_object_to_cluster(iprotoxs);
         iproto_cluster_free(cluster);
 
 MR::IProto::XS
 ixs_remove_singleton(klass)
         SV *klass
     CODE:
+        if (!SvPOK(klass))
+            croak("remove_singleton() should be called as a class method");
         dMY_CXT;
-        RETVAL = SvREFCNT_inc(hv_delete_ent(MY_CXT.singletons, klass, 0, 0));
+        SV *cluster = hv_delete_ent(MY_CXT.singletons, klass, 0, 0);
+        RETVAL = cluster ? SvREFCNT_inc(cluster) : &PL_sv_undef;
+    OUTPUT:
+        RETVAL
+
+MR::IProto::XS
+ixs_instance(klass)
+        SV *klass
+    CODE:
+        if (!SvPOK(klass))
+            croak("instance() should be called as a class method");
+        dMY_CXT;
+        HE *he = hv_fetch_ent(MY_CXT.singletons, klass, 0, 0);
+        RETVAL = he ? SvREFCNT_inc(HeVAL(he)) : &PL_sv_undef;
     OUTPUT:
         RETVAL
 
@@ -517,10 +539,15 @@ ixs_bulk(iprotoxs, list, ...)
         for (int i = 0; i < nmessages; i++) {
             SV **sv = av_fetch(list, i, 0);
             if (!(sv && SvROK(*sv) && SvTYPE(SvRV(*sv)) == SVt_PVHV))
-                croak("Messages should be HASH references");
-            messages[i] = iprotoxs_hv_to_message((HV *)SvRV(*sv));
+                croak("Message should be a HASHREF");
+            HV *request = (HV *)SvRV(*sv);
+            if (iprotoxs && !hv_exists(request, "iproto", 6)) {
+                (void)hv_store(request, "iproto", 6, SvREFCNT_inc(iprotoxs), 0);
+                SAVEDELETE(request, savepvn("iproto", 6), 6);
+            }
+            messages[i] = iprotoxs_hv_to_message(request);
         }
-        iproto_cluster_bulk(cluster, messages, nmessages, timeout);
+        iproto_bulk(messages, nmessages, timeout);
         RETVAL = newAV();
         for (int i = 0; i < nmessages; i++) {
             SV **sv = av_fetch(list, i, 0);
@@ -539,8 +566,12 @@ ixs_do(iprotoxs, request, ...)
         HV *request
     CODE:
         iprotoxs_call_timeout(timeout, 2);
+        if (iprotoxs && !hv_exists(request, "iproto", 6)) {
+            (void)hv_store(request, "iproto", 6, SvREFCNT_inc(iprotoxs), 0);
+            SAVEDELETE(request, savepvn("iproto", 6), 6);
+        }
         iproto_message_t *message = iprotoxs_hv_to_message(request);
-        iproto_cluster_do(cluster, message, timeout);
+        iproto_do(message, timeout);
         RETVAL = (HV *)sv_2mortal((SV *)iprotoxs_message_to_hv(message, request));
         dMY_CXT;
         hv_clear(MY_CXT.soft_retry_callbacks);
@@ -551,6 +582,9 @@ IV
 ixs_get_shard_count(iprotoxs)
         MR::IProto::XS iprotoxs
     CODE:
+        if (!iprotoxs)
+            croak("get_shard_count() should be called as an instance or a singleton method");
+        iproto_cluster_t *cluster = iprotoxs_object_to_cluster(iprotoxs);
         RETVAL = iproto_cluster_get_shard_count(cluster);
     OUTPUT:
         RETVAL

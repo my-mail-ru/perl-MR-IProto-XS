@@ -3,24 +3,16 @@ MR::IProto::XS  T_PTROBJ_IP
 
 INPUT
 T_PTROBJ_IP
-    bool singleton_call;
-    iproto_cluster_t *${ $var eq q/iprotoxs/ ? \q/cluster/ : \qq/${var}x/ };
     if (sv_derived_from($arg, \"${ntype}\")) {
         if (SvPOK($arg)) {
             dMY_CXT;
             HE *he = hv_fetch_ent(MY_CXT.singletons, $arg, 0, 0);
-            if (!he)
-                Perl_croak(aTHX_ \"singleton %s not found\", SvPV_nolen($arg));
-            $var = HeVAL(he);
-            singleton_call = true;
+            $var = he ? HeVAL(he) : NULL;
         } else {
             $var = $arg;
-            singleton_call = false;
         }
-        ${ $var eq q/iprotoxs/ ? \q/cluster/ : \qq/${var}x/ } = INT2PTR(iproto_cluster_t *, SvIV((SV*)SvRV($var)));
     } else
         Perl_croak(aTHX_ \"$var is not of type ${ntype}\");
-    (void)singleton_call; // make gcc happy
 
 OUTPUT
 T_PTROBJ_IP

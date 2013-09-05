@@ -18,4 +18,7 @@ void iprotoxs_parse_opts(iproto_message_opts_t *opts, HV *request);
         } \
     }
 
+#define iprotoxs_object_to_cluster(iprotoxs) \
+    (iprotoxs ? INT2PTR(iproto_cluster_t *, SvIV((SV*)SvRV(iprotoxs))) : NULL)
+
 #endif

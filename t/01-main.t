@@ -1,7 +1,8 @@
 use strict;
 use warnings;
-use Test::More tests => 72;
+use Test::More tests => 80;
 use Test::LeakTrace;
+use Perl::Destruct::Level level => 2;
 use IO::Socket;
 use Time::HiRes qw/sleep time/;
 use POSIX qw/SIGTERM/;
@@ -35,6 +36,7 @@ check_soft_retry();
 check_timeout();
 check_replica();
 check_priority();
+check_multicluster();
 check_pinger();
 check_fork();
 check_stat();
@@ -544,6 +546,14 @@ sub check_timeout {
         is(sprintf('%.01f', time() - $start), '2.0', "call timeout time");
     }
 
+    {
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$EMPTY_PORT"]);
+        local $msg->{shard_num} = 10;
+        my $start = time();
+        my $resp = $iproto->do($msg, timeout => 2);
+        is(sprintf('%.01f', time() - $start), '0.0', "call timeout time with zero messages in progress");
+    }
+
     close_all_servers();
     return;
 }
@@ -592,6 +602,29 @@ sub check_priority {
     return;
 }
 
+sub check_multicluster {
+    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 0 ] }, response => { method => 'unpack', format => 'L' } };
+
+    {
+        my $port1 = fork_test_server(sub { check_and_reply($_[0], 17, pack('L', 0), pack('L', 1)) });
+        my $port2 = fork_test_server(sub { check_and_reply($_[0], 17, pack('L', 0), pack('L', 2)) });
+        my $iproto1 = MR::IProto::XS->new(masters => ["127.0.0.1:$port1"]);
+        my $iproto2 = MR::IProto::XS->new(masters => ["127.0.0.1:$port2"]);
+        my $resp = MR::IProto::XS->bulk([ { %$msg, iproto => $iproto1 }, { %$msg, iproto => $iproto2 } ]);
+        is_deeply($resp, [ { error => 'ok', data => [ 1 ] }, { error => 'ok', data => [ 2 ] } ], "multicluster bulk");
+    }
+
+    {
+        my $port = fork_test_server(sub { check_and_reply($_[0], 17, pack('L', 0), pack('L', 1)) });
+        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $resp = MR::IProto::XS->do({ %$msg, iproto => $iproto });
+        is_deeply($resp, { error => 'ok', data => [ 1 ] }, "multicluster do");
+    }
+
+    close_all_servers();
+    return;
+}
+
 sub check_pinger {
     my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' } };
 
@@ -612,7 +645,41 @@ sub check_pinger {
 
         my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
         my $resp = $iproto->bulk([$msg]);
-        is_deeply($resp, [ { error => 'ok', data => [ 9 ] } ], "check pinger");
+        is_deeply($resp, [ { error => 'ok', data => [ 9 ] } ], "check pinger: blocked");
+
+        sleep 1;
+        $pinger_string = "lwp:xxx,iproto:127.0.0.1:29998\0";
+        $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
+
+        $resp = $iproto->bulk([$msg]);
+        is_deeply($resp, [ { error => 'ok', data => [ 8 ] } ], "check pinger: unblocked");
+    }
+
+    {
+        my $port1 = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 8));
+        });
+        my $port2 = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
+        });
+
+        sleep 1;
+        my $pinger_string = "lwp:xxx,iproto:127.0.0.1:$port1,iproto:127.0.0.1:$port2\0";
+        my $share = IPC::SharedMem->new(MR::Pinger::Const::SHM_KEY_FALL(), MR::Pinger::Const::SHM_SIZE(), 0666|IPC_CREAT) or die "Failed to create pinger shared memory";
+        $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
+
+        my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
+        my $resp = $iproto->bulk([$msg]);
+        is_deeply($resp, [ { error => 'no server available' } ], "check pinger: all are blocked");
+
+        sleep 1;
+        $pinger_string = "lwp:xxx,iproto:127.0.0.1:29998\0";
+        $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
+
+        $resp = $iproto->bulk([$msg]);
+        is_deeply($resp, [ { error => 'ok', data => [ 8 ] } ], "check pinger: all are unblocked");
     }
 
     close_all_servers();
@@ -675,15 +742,19 @@ sub check_singleton {
     });
     {
         my $singleton = Test::Smth->create_singleton(masters => ["127.0.0.1:$port"]);
-        isa_ok($singleton, "Test::Smth");
+        isa_ok($singleton, "Test::Smth", "create_singleton()");
     }
 
     my $msg = { code => 17, request => { method => 'pack', format => 'Lw/a*L', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L' } };
     my $resp = Test::Smth->bulk([$msg, $msg, $msg]);
     is_deeply($resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 13) ], "generic request througth singleton");
     {
+        my $singleton = Test::Smth->instance();
+        isa_ok($singleton, "Test::Smth", "instance()");
+    }
+    {
         my $singleton = Test::Smth->remove_singleton();
-        isa_ok($singleton, "Test::Smth");
+        isa_ok($singleton, "Test::Smth", "remove_singleton()");
     }
     close_all_servers();
     return;
@@ -705,6 +776,7 @@ sub check_leak {
     no_leaks_ok { check_timeout() } "timeout not leaks";
     no_leaks_ok { check_replica() } "replica not leaks";
     no_leaks_ok { check_priority() } "priority not leaks";
+    no_leaks_ok { check_multicluster() } "multicluster not leaks";
     no_leaks_ok { check_pinger() } "pinger not leaks";
     no_leaks_ok { check_stat() } "stat not leaks";
     no_leaks_ok { check_singleton() } "singleton not leaks";
