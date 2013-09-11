@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 80;
+use Test::More tests => 82;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use IO::Socket;
@@ -736,21 +736,28 @@ sub check_stat {
 }
 
 sub check_singleton {
-    my $port = fork_test_server(sub {
-        my ($socket) = @_;
-        check_and_reply($socket, 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 13);
-    });
+    my $port = fork_test_server(sub { check_and_reply($_[0], 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 13, 11 .. 13) });
     {
         my $singleton = Test::Smth->create_singleton(masters => ["127.0.0.1:$port"]);
         isa_ok($singleton, "Test::Smth", "create_singleton()");
     }
 
-    my $msg = { code => 17, request => { method => 'pack', format => 'Lw/a*L', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L' } };
-    my $resp = Test::Smth->bulk([$msg, $msg, $msg]);
-    is_deeply($resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 13) ], "generic request througth singleton");
+    {
+        my $msg = { code => 17, request => { method => 'pack', format => 'Lw/a*L', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L' } };
+        my $resp = Test::Smth->bulk([$msg, $msg, $msg]);
+        is_deeply($resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 13) ], "generic request througth singleton");
+    }
+
+    {
+        my $msg = { iproto => 'Test::Smth', code => 17, request => { method => 'pack', format => 'Lw/a*L', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L' } };
+        my $resp = MR::IProto::XS->bulk([$msg, $msg, $msg]);
+        is_deeply($resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 13) ], "generic request througth singleton called as class method");
+    }
+
     {
         my $singleton = Test::Smth->instance();
         isa_ok($singleton, "Test::Smth", "instance()");
+        cmp_ok($singleton->instance(), '==', $singleton, "instance() called on object");
     }
     {
         my $singleton = Test::Smth->remove_singleton();

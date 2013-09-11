@@ -1,6 +1,7 @@
 #ifndef IPROTOXS_H_INCLUDED
 #define IPROTOXS_H_INCLUDED
 
+SV *iprotoxs_instance(SV *sv);
 void iprotoxs_timeval_set(SV *sv, struct timeval *timeout);
 void iprotoxs_parse_opts(iproto_message_opts_t *opts, HV *request);
 
@@ -18,7 +19,7 @@ void iprotoxs_parse_opts(iproto_message_opts_t *opts, HV *request);
         } \
     }
 
-#define iprotoxs_object_to_cluster(iprotoxs) \
-    (iprotoxs ? INT2PTR(iproto_cluster_t *, SvIV((SV*)SvRV(iprotoxs))) : NULL)
+#define iprotoxs_instance_to_cluster(sv) \
+    INT2PTR(iproto_cluster_t *, SvIV((SV*)SvRV(sv)))
 
 #endif

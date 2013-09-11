@@ -249,6 +249,25 @@ AV *iprotoxs_unpack_data(HV *opts, char *data, STRLEN length, SV *errsv) {
     return result;
 }
 
+SV *iprotoxs_instance(SV *sv) {
+    if (!sv_derived_from(sv, "MR::IProto::XS")) {
+        croak("\"%s\" is not of type MR::IProto::XS", SvPV_nolen(sv));
+    } else if (SvPOK(sv)) {
+        dMY_CXT;
+        HE *he = hv_fetch_ent(MY_CXT.singletons, sv, 0, 0);
+        return he ? HeVAL(he) : NULL;
+    } else {
+        return sv;
+    }
+}
+
+static iproto_cluster_t *iprotoxs_extract_cluster(SV *sv) {
+    if (!sv)
+        return NULL;
+    SV *instance = iprotoxs_instance(sv);
+    return instance ? iprotoxs_instance_to_cluster(instance) : NULL;
+}
+
 void iprotoxs_timeval_set(SV *sv, struct timeval *timeout) {
     if (SvIOK(sv)) {
         timeout->tv_sec = SvIV(sv);
@@ -327,9 +346,8 @@ iproto_message_t *iprotoxs_hv_to_message(HV *request) {
 
     val = hv_fetch(request, "iproto", 6, 0);
     if (!val) croak("\"iproto\" should be specified");
-    if (!sv_derived_from(*val, "MR::IProto::XS"))
-        croak("\"iproto\" is not of type MR::IProto::XS");
-    iproto_cluster_t *cluster = iprotoxs_object_to_cluster(*val);
+    iproto_cluster_t *cluster = iprotoxs_extract_cluster(*val);
+    if (!cluster) croak("\"iproto\" should be an instance or a singleton of type MR::IProto::XS");
 
     val = hv_fetch(request, "code", 4, 0);
     if (!val) croak("\"code\" should be specified");
@@ -498,9 +516,9 @@ void
 ixs_DESTROY(iprotoxs)
         MR::IProto::XS iprotoxs
     CODE:
-        if (!iprotoxs)
+        iproto_cluster_t *cluster = iprotoxs_extract_cluster(iprotoxs);
+        if (!cluster)
             croak("DESTROY should be called as an instance method");
-        iproto_cluster_t *cluster = iprotoxs_object_to_cluster(iprotoxs);
         iproto_cluster_free(cluster);
 
 MR::IProto::XS
@@ -519,11 +537,8 @@ MR::IProto::XS
 ixs_instance(klass)
         SV *klass
     CODE:
-        if (!SvPOK(klass))
-            croak("instance() should be called as a class method");
-        dMY_CXT;
-        HE *he = hv_fetch_ent(MY_CXT.singletons, klass, 0, 0);
-        RETVAL = he ? SvREFCNT_inc(HeVAL(he)) : &PL_sv_undef;
+        SV *instance = iprotoxs_instance(klass);
+        RETVAL = instance ? SvREFCNT_inc(instance) : &PL_sv_undef;
     OUTPUT:
         RETVAL
 
@@ -582,9 +597,9 @@ IV
 ixs_get_shard_count(iprotoxs)
         MR::IProto::XS iprotoxs
     CODE:
-        if (!iprotoxs)
+        iproto_cluster_t *cluster = iprotoxs_extract_cluster(iprotoxs);
+        if (!cluster)
             croak("get_shard_count() should be called as an instance or a singleton method");
-        iproto_cluster_t *cluster = iprotoxs_object_to_cluster(iprotoxs);
         RETVAL = iproto_cluster_get_shard_count(cluster);
     OUTPUT:
         RETVAL
