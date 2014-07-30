@@ -14,11 +14,43 @@ typedef struct {
     SV *stat_callback;
     HV *soft_retry_callbacks;
     CV *unpack;
+    SV *logfunc;
 } my_cxt_t;
 
 START_MY_CXT;
 
 typedef SV * MR__IProto__XS;
+
+static void iprotoxs_logfunc_warn(iproto_logmask_t mask, const char *str) {
+    char *level;
+    switch (mask & LOG_LEVEL) {
+        case LOG_ERROR:   level = "error";   break;
+        case LOG_WARNING: level = "warning"; break;
+        case LOG_INFO:    level = "info";    break;
+        case LOG_DEBUG:   level = "debug";   break;
+        default:          level = "unknown";
+    }
+    warn("%s: %s\n", level, str);
+}
+
+static void iprotoxs_logfunc_call(iproto_logmask_t mask, const char *str) {
+    dSP;
+    ENTER;
+    SAVETMPS;
+    PUSHMARK(SP);
+    mXPUSHu(mask);
+    mXPUSHp(str, strlen(str));
+    PUTBACK;
+    dMY_CXT;
+    call_sv(MY_CXT.logfunc, G_EVAL|G_DISCARD);
+    SPAGAIN;
+    if (SvTRUE(ERRSV)) {
+        warn("MR::IProto::XS: died in logfunc's callback: %s", SvPV_nolen(ERRSV));
+        iprotoxs_logfunc_warn(mask, str);
+    }
+    FREETMPS;
+    LEAVE;
+}
 
 static void iprotoxs_stat_callback(const char *type, const char *server, uint32_t error, const iproto_stat_data_t *data) {
     dSP;
@@ -451,6 +483,7 @@ PROTOTYPES: ENABLE
 
 BOOT:
     iproto_initialize();
+    iproto_set_logfunc(iprotoxs_logfunc_warn);
     HV *stash = gv_stashpv("MR::IProto::XS", 1);
 #define IPROTOXS_CONST(s, ...) newCONSTSUB(stash, #s, newSVuv(s));
     IPROTO_ALL_ERROR_CODES(IPROTOXS_CONST);
@@ -610,6 +643,24 @@ ixs_set_logmask(klass, mask)
     CODE:
         iproto_set_logmask(mask);
 
+void
+ixs_set_logfunc(klass, callback)
+        SV *callback
+    CODE:
+        dMY_CXT;
+        if (SvOK(callback)) {
+            if (MY_CXT.logfunc) {
+                SvSetSV(MY_CXT.logfunc, callback);
+            } else {
+                MY_CXT.logfunc = newSVsv(callback);
+                iproto_set_logfunc(iprotoxs_logfunc_call);
+            }
+        } else if (MY_CXT.logfunc) {
+            SvREFCNT_dec(MY_CXT.logfunc);
+            MY_CXT.logfunc = NULL;
+            iproto_set_logfunc(iprotoxs_logfunc_warn);
+        }
+
 MODULE = MR::IProto::XS		PACKAGE = MR::IProto::XS::Stat		PREFIX = ixs_stat_
 
 #ifdef WITH_GRAPHITE
@@ -637,15 +688,17 @@ ixs_stat_set_callback(klass, callback)
         SV *callback
     CODE:
         dMY_CXT;
-        if (callback == NULL) {
+        if (SvOK(callback)) {
+            if (MY_CXT.stat_callback) {
+                SvSetSV(MY_CXT.stat_callback, callback);
+            } else {
+                MY_CXT.stat_callback = newSVsv(callback);
+                iproto_stat_set_callback(iprotoxs_stat_callback);
+            }
+        } else if (MY_CXT.stat_callback) {
             SvREFCNT_dec(MY_CXT.stat_callback);
             MY_CXT.stat_callback = NULL;
             iproto_stat_set_callback(NULL);
-        } else if (MY_CXT.stat_callback == NULL) {
-            MY_CXT.stat_callback = newSVsv(callback);
-            iproto_stat_set_callback(iprotoxs_stat_callback);
-        } else {
-            SvSetSV(MY_CXT.stat_callback, callback);
         }
 
 void
