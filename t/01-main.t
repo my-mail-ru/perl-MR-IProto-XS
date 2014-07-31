@@ -1,21 +1,30 @@
 use strict;
 use warnings;
-use Test::More tests => 82;
+use Test::More tests => 85;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use IO::Socket;
+use Getopt::Long;
 use Time::HiRes qw/sleep time/;
 use POSIX qw/SIGTERM/;
 use MR::Pinger::Const;
 use IPC::SysV qw/IPC_CREAT/;
 use IPC::SharedMem;
 
+my $valgrind;
+GetOptions('valgrind!' => \$valgrind);
+my (%newopts, %msgopts);
+if ($valgrind) {
+    $newopts{connect_timeout} = 2;
+    $msgopts{timeout} = 2;
+}
+
 BEGIN { use_ok('MR::IProto::XS') };
 
 MR::IProto::XS->set_logmask(MR::IProto::XS::LOG_NOTHING);
 ok(MR::IProto::XS::Stat->set_graphite("alei9.mail.ru", 2005, "my.iproto-xs"), "set_graphite") or diag($!);
 
-isa_ok(MR::IProto::XS->new(shards => {}), 'MR::IProto::XS');
+isa_ok(MR::IProto::XS->new(%newopts, shards => {}), 'MR::IProto::XS');
 
 my $PORT = $ENV{FIRST_PORT} || 40000;
 my $EMPTY_PORT = $ENV{EMPTY_PORT} || 19999;
@@ -88,6 +97,7 @@ sub fork_test_server {
     }
     push @servers, $pid;
     sleep 0.5;
+    sleep 1.5 if $valgrind;
     return $port;
 }
 
@@ -152,13 +162,13 @@ sub check_const {
 }
 
 sub check_new {
-    my $iproto = MR::IProto::XS->new(
+    my $iproto = MR::IProto::XS->new(%newopts,
         masters  => ['10.0.0.1:1000', '10.0.0.2:2000'],
         replicas => ['10.0.1.1:1001', '10.0.1.2:2001'],
     );
     is($iproto->get_shard_count(), 1, "one shard");
 
-    $iproto = MR::IProto::XS->new(
+    $iproto = MR::IProto::XS->new(%newopts,
         shards => {
             1 => { masters => ['10.0.2.1:1002'], replicas => ['10.0.3.1:1003'] },
             2 => { masters => ['10.0.2.2:2002'], replicas => ['10.0.3.2:2003'] },
@@ -167,12 +177,16 @@ sub check_new {
     );
     is($iproto->get_shard_count(), 3, "three shards");
 
-    $iproto = MR::IProto::XS->new(
+    $iproto = MR::IProto::XS->new(%newopts,
         masters  => [['10.0.0.1:1000', '10.0.0.2:2000'], ['10.0.0.3:3000', '10.0.0.4:4000']],
         replicas => [['10.0.1.1:1001', '10.0.1.2:2001'], ['10.0.1.3:3001', '10.0.1.4:4001']],
     );
 
-    $iproto = MR::IProto::XS->new(
+    $iproto = MR::IProto::XS->new(%newopts,
+        masters => ['188.93.61.208:30000'],
+    );
+
+    $iproto = MR::IProto::XS->new(%newopts,
         masters => ['188.93.61.208:30000'],
     );
 
@@ -180,22 +194,22 @@ sub check_new {
 }
 
 sub check_errors {
-    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 0x01020304 ] } };
+    my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 0x01020304 ] } };
 
     {
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$EMPTY_PORT"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$EMPTY_PORT"]);
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ map {{ error => "connection error" }} (1 .. 3) ], "connection error");
     }
 
     {
-        my $iproto = MR::IProto::XS->new(masters => ["10.0.0.1:$EMPTY_PORT"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["10.0.0.1:$EMPTY_PORT"]);
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ map {{ error => "timeout" }} (1 .. 3) ], "timeout");
     }
 
     {
-        my $iproto = MR::IProto::XS->new(shards => { 1 => { masters => ["127.0.0.1:$EMPTY_PORT"] }, 2 => { masters => ["10.0.0.1:$EMPTY_PORT"] } });
+        my $iproto = MR::IProto::XS->new(%newopts, shards => { 1 => { masters => ["127.0.0.1:$EMPTY_PORT"] }, 2 => { masters => ["10.0.0.1:$EMPTY_PORT"] } });
         my $resp = $iproto->bulk([{ %$msg, shard_num => 1 }, { %$msg, shard_num => 2 }, { %$msg, shard_num => 3 }]);
         is_deeply($resp, [ { error => "connection error" }, { error => "timeout" }, { error => "invalid shard_num" } ], "different errors for different shards");
         $resp = $iproto->bulk([$msg]);
@@ -206,14 +220,14 @@ sub check_errors {
 
     {
         my $port = fork_test_server(sub { });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ map {{ error => "connection error" }} (1 .. 3) ], "unexpected close");
     }
 
     {
         my $port = fork_test_server(sub { sleep 2.5 });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ map {{ error => "timeout" }} (1 .. 3) ], "send/recv timeout");
     }
@@ -236,7 +250,7 @@ sub check_errors {
             echo(@_);
             return;
         });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ { error => 'ok', data => pack('L', 0x01020304) }, map {{ error => 'protocol error' }} (1, 2) ], "invalid sync");
     }
@@ -247,23 +261,23 @@ sub check_errors {
 
 sub check_success {
     {
-        my $msg = { code => 17, request => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L*' } };
+        my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L*' } };
         my $port = fork_test_server(sub {
             my ($socket) = @_;
             check_and_reply($socket, 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 23);
         });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk([ map $msg, (11 .. 23)]);
         is_deeply($resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 23) ], "generic request");
     }
 
     {
-        my $msg = { code => 17, request => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L*' }, inplace => 1 };
+        my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L*' }, inplace => 1 };
         my $port = fork_test_server(sub {
             my ($socket) = @_;
             check_and_reply($socket, 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 23);
         });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk(my $req = [ map {{
                 code     => 17,
                 request  => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] },
@@ -280,27 +294,53 @@ sub check_success {
     }
 
     {
-        my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 1 ] }, response => { method => 'unpack', format => 'L' } };
+        my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 1 ] }, response => { method => 'unpack', format => 'L' } };
         my $port = fork_test_server(sub { echo(@_) for (5, 6) });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk(msgs($msg, 5));
         is_deeply($resp, [ { error => "ok", data => [ 5 ] } ], "two requests: first");
         $resp = $iproto->bulk(msgs($msg, 6));
         is_deeply($resp, [ { error => "ok", data => [ 6 ] } ], "two requests: second");
     }
 
-    {
-        my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 1 ] }, response => { method => 'unpack', format => 'L' } };
+    SKIP: {
+        skip "valgrind: too long test", 1 if $valgrind;
+        my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 1 ] }, response => { method => 'unpack', format => 'L' } };
         my $port1 = fork_test_server(map { sub { check_and_reply($_[0], 17, pack('L', 1), pack('L', 1)); } } (1 .. 100));
         my $port2 = fork_test_server(map { sub { check_and_reply($_[0], 17, pack('L', 1), pack('L', 2)); } } (1 .. 100));
         my $port3 = fork_test_server(map { sub { check_and_reply($_[0], 17, pack('L', 1), pack('L', 3)); } } (1 .. 100));
         my %count;
         for (1 .. 100) {
-            my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port1", "127.0.0.1:$port2", "127.0.0.1:$port3"]);
+            my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port1", "127.0.0.1:$port2", "127.0.0.1:$port3"]);
             my $resp = $iproto->do($msg);
             $count{$resp->{data}->[0]}++ if $resp->{error} == 0;
         }
         is(scalar grep({ $_ > 20 } values %count), 3, "shuffle");
+    }
+
+    {
+        my $msg = { %msgopts, code => 17, request => pack('Lw/a*L*', 89, 'test', 15) };
+        my $port = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 23);
+        });
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
+        my $resp = $iproto->bulk([ map $msg, (11 .. 23)]);
+        is_deeply($resp, [ map {{ error => "ok", data => pack('w/a*L', 'test', $_) }} (11 .. 23) ], "simplified request");
+    }
+
+    {
+        my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L*' } };
+        my $port = fork_test_server(
+            sub { check_and_reply($_[0], 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 13); $_[0]->close },
+            sub { check_and_reply($_[0], 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 13) },
+        );
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
+        my $resp = $iproto->bulk([ map $msg, (11 .. 13)]);
+        is_deeply($resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 13) ], "closed by server 1");
+        sleep 0.2;
+        $resp = $iproto->bulk([ map $msg, (11 .. 13)]);
+        is_deeply($resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 13) ], "closed by server 2");
     }
 
     close_all_servers();
@@ -308,45 +348,54 @@ sub check_success {
 }
 
 sub check_early_retry {
-    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 0x01020304 ] }, response => { method => 'unpack', format => 'L' }, early_retry => 1 };
+    my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 0x01020304 ] }, response => { method => 'unpack', format => 'L' }, early_retry => 1 };
 
     {
         my $port1 = fork_test_server(sub { sleep 2 });
         my $port2 = fork_test_server(sub { echo(@_) for (11 .. 13) });
-        my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"], ["127.0.0.1:$EMPTY_PORT"]]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"], ["127.0.0.1:$EMPTY_PORT"]]);
         my $start = time();
         my $resp = $iproto->bulk(msgs($msg, (11 .. 13)));
         is_deeply($resp, [ map {{ error => 'ok', data => [ $_ ] }} (11 .. 13) ], "early retry");
-        is(sprintf('%.02f', time() - $start), '0.06', "early retry time");
+        SKIP: {
+            skip "valgrind: time is useless", 1 if $valgrind;
+            is(sprintf('%.02f', time() - $start), '0.06', "early retry time");
+        }
     }
 
     {
         my $port1 = fork_test_server(sub { sleep 2 });
         my $port2 = fork_test_server(sub { echo(@_) for (11 .. 13) });
-        my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
         my $start = time();
         my $resp = $iproto->bulk(msgs($msg, (11 .. 13)));
         is_deeply($resp, [ map {{ error => 'ok', data => [ $_ ] }} (11 .. 13) ], "early retry with less servers");
-        is(sprintf('%.02f', time() - $start), '0.06', "early retry with less servers time");
+        SKIP: {
+            skip "valgrind: time is useless", 1 if $valgrind;
+            is(sprintf('%.02f', time() - $start), '0.06', "early retry with less servers time");
+        }
     }
 
     {
         my $port = fork_test_server(sub { sleep 2 });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $start = time();
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "early retry with no servers");
-        is(sprintf('%.02f', time() - $start), '0.50', "early retry with no servers time");
+        SKIP: {
+            skip "valgrind: time is useless", 1 if $valgrind;
+            is(sprintf('%.02f', time() - $start), '0.50', "early retry with no servers time");
+        }
     }
 
     {
         my $port1 = fork_test_server(sub { sleep 0.1; echo(@_) foreach (21 .. 26) });
         my $port2 = fork_test_server(sub { echo(@_) foreach (11 .. 13) });
-        my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
         my $resp = $iproto->bulk(msgs($msg, (11 .. 13)));
         is_deeply($resp, [ map {{ error => 'ok', data => [ $_ ] }} (11 .. 13) ], "early retry 2");
 
-        $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port1"]);
+        $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port1"]);
         $resp = $iproto->bulk(msgs($msg, (24 .. 26)));
         is_deeply($resp, [ map {{ error => 'ok', data => [ $_ ] }} (24 .. 26) ], "server wake up after early retry");
     }
@@ -356,14 +405,14 @@ sub check_early_retry {
 }
 
 sub check_retry {
-    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, from => 'master,replica', safe_retry => 0 };
+    my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, from => 'master,replica', safe_retry => 0 };
 
     {
         my $port = fork_test_server(sub {}, sub {
             my ($socket) = @_;
             check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
         });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk([$msg]);
         is_deeply($resp, [ { error => 'ok', data => [ 9 ] } ], "retry when only one server allowed");
     }
@@ -378,7 +427,7 @@ sub check_retry {
             my ($socket) = @_;
             check_and_reply($socket, 17, pack('L', 97), pack('L', 2));
         });
-        my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
         my $resp = $iproto->do($msg);
         is_deeply($resp, { error => 'ok', data => [ 1 ] }, "retry from the same server");
     }
@@ -393,7 +442,7 @@ sub check_retry {
             my ($socket) = @_;
             check_and_reply($socket, 17, pack('L', 97), pack('L', 2));
         });
-        my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
         my $resp = $iproto->do($msg);
         is_deeply($resp, { error => 'ok', data => [ 2 ] }, "retry from another server");
     }
@@ -405,7 +454,7 @@ sub check_retry {
             my ($socket) = @_;
             check_and_reply($socket, 17, pack('L', 97), pack('L', 2));
         });
-        my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
         my $resp = $iproto->do($msg);
         is_deeply($resp, { error => 'timeout' }, "safe retry - is unsafe");
     }
@@ -416,7 +465,7 @@ sub check_retry {
             my ($socket) = @_;
             check_and_reply($socket, 17, pack('L', 97), pack('L', 2));
         });
-        my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$EMPTY_PORT"], ["127.0.0.1:$port"]]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$EMPTY_PORT"], ["127.0.0.1:$port"]]);
         my $resp = $iproto->do($msg);
         is_deeply($resp, { error => 'ok', data => [ 2 ] }, "safe retry - is safe");
     }
@@ -428,7 +477,7 @@ sub check_retry {
             my ($socket) = @_;
             check_and_reply($socket, 17, pack('L', 97), pack('L', 2));
         });
-        my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$EMPTY_PORT"], ["127.0.0.1:$port"]]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$EMPTY_PORT"], ["127.0.0.1:$port"]]);
         my $resp = $iproto->do($msg);
         is_deeply($resp, { error => 'ok', data => [ 2 ] }, "safe retry from the same server goes to another");
     }
@@ -439,7 +488,7 @@ sub check_retry {
 
 sub check_soft_retry {
     my $count = 0;
-    my $msg = {
+    my $msg = { %msgopts,
         code => 17,
         request => { method => 'pack', format => 'L', data => [ 97 ] },
         response => { method => 'unpack', format => 'L' },
@@ -452,11 +501,14 @@ sub check_soft_retry {
             check_and_reply($socket, 17, pack('L', 97), pack('L', 12));
             check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
         });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $start = time();
         my $resp = $iproto->bulk([$msg]);
         is_deeply($resp, [ { error => 'ok', data => [ 9 ] } ], "soft_retry - want");
-        is(sprintf('%.01f', time() - $start), '0.1', "soft_retry - retry time");
+        SKIP: {
+            skip "valgrind: time is useless", 1 if $valgrind;
+            is(sprintf('%.01f', time() - $start), '0.1', "soft_retry - retry time");
+        }
     }
 
     {
@@ -465,7 +517,7 @@ sub check_soft_retry {
             check_and_reply($socket, 17, pack('L', 97), pack('L', 13));
             check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
         });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk([$msg]);
         is_deeply($resp, [ { error => 'ok', data => [ 13 ] } ], "soft_retry - don't want");
     }
@@ -477,12 +529,15 @@ sub check_soft_retry {
             check_and_reply($socket, 17, pack('L', 97), pack('L', 12));
             check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
         });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         local $msg->{max_tries} = 6;
         my $start = time();
         my $resp = $iproto->bulk([$msg]);
         is_deeply($resp, [ { error => 'ok', data => [ 9 ] } ], "soft_retry - want twice");
-        is(sprintf('%.01f', time() - $start), '0.4', "soft_retry - twice retry time");
+        SKIP: {
+            skip "valgrind: time is useless", 1 if $valgrind;
+            is(sprintf('%.01f', time() - $start), '0.4', "soft_retry - twice retry time");
+        }
     }
 
     {
@@ -493,11 +548,14 @@ sub check_soft_retry {
             check_and_reply($socket, 17, pack('L', 97), pack('L', 12));
             check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
         });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $start = time();
         my $resp = $iproto->bulk([$msg]);
         is_deeply($resp, [ { error => 'ok', data => [ 12 ] } ], "soft_retry - want max");
-        is(sprintf('%.01f', time() - $start), '1.0', "soft_retry - max retry time");
+        SKIP: {
+            skip "valgrind: time is useless", 1 if $valgrind;
+            is(sprintf('%.01f', time() - $start), '1.0', "soft_retry - max retry time");
+        }
     }
 
     is($count, 8, "soft_retry count");
@@ -506,10 +564,10 @@ sub check_soft_retry {
 }
 
 sub check_timeout {
-    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, from => 'master,replica', safe_retry => 0 };
+    my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, from => 'master,replica', safe_retry => 0 };
 
     {
-        my $iproto = MR::IProto::XS->new(masters => ["10.0.0.1:$EMPTY_PORT"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["10.0.0.1:$EMPTY_PORT"]);
         my $start = time();
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "server connect timeout");
@@ -518,7 +576,7 @@ sub check_timeout {
 
     {
         my $port = fork_test_server(sub { sleep 2 });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         local $msg->{max_tries} = 1;
         my $start = time();
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
@@ -528,7 +586,7 @@ sub check_timeout {
 
     {
         my $port = fork_test_server(sub { sleep 2 });
-        my $iproto = MR::IProto::XS->new(masters => [["10.0.0.1:$EMPTY_PORT"], ["127.0.0.1:$port"]]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => [["10.0.0.1:$EMPTY_PORT"], ["127.0.0.1:$port"]]);
         local $msg->{max_tries} = 2;
         my $start = time();
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
@@ -538,7 +596,7 @@ sub check_timeout {
 
     {
         my $port = fork_test_server(map { sub { sleep 1 } } (1 .. 10));
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         local $msg->{max_tries} = 10;
         my $start = time();
         my $resp = $iproto->bulk([$msg, $msg, $msg], timeout => 2);
@@ -547,7 +605,7 @@ sub check_timeout {
     }
 
     {
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$EMPTY_PORT"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$EMPTY_PORT"]);
         local $msg->{shard_num} = 10;
         my $start = time();
         my $resp = $iproto->do($msg, timeout => 2);
@@ -559,7 +617,7 @@ sub check_timeout {
 }
 
 sub check_replica {
-    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, from => 'master,replica', safe_retry => 0 };
+    my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, from => 'master,replica', safe_retry => 0 };
 
     {
         my $port1 = fork_test_server(sub {
@@ -571,7 +629,7 @@ sub check_replica {
             my ($socket) = @_;
             check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
         });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port1"], replicas => ["127.0.0.1:$port2"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port1"], replicas => ["127.0.0.1:$port2"]);
         my $resp = $iproto->bulk([$msg, $msg]);
         is_deeply($resp, [ { error => 'ok', data => [ 8 ] }, { error => 'ok', data => [ 9 ], replica => 1 } ], "retry from replica");
     }
@@ -581,7 +639,7 @@ sub check_replica {
 }
 
 sub check_priority {
-    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, safe_retry => 0 };
+    my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, safe_retry => 0 };
 
     {
         my $port1 = fork_test_server(sub {
@@ -593,7 +651,7 @@ sub check_priority {
             my ($socket) = @_;
             check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
         });
-        my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
         my $resp = $iproto->bulk([$msg, $msg]);
         is_deeply($resp, [ { error => 'ok', data => [ 8 ] }, { error => 'ok', data => [ 9 ] } ], "retry from low priority");
     }
@@ -603,20 +661,20 @@ sub check_priority {
 }
 
 sub check_multicluster {
-    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 0 ] }, response => { method => 'unpack', format => 'L' } };
+    my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 0 ] }, response => { method => 'unpack', format => 'L' } };
 
     {
         my $port1 = fork_test_server(sub { check_and_reply($_[0], 17, pack('L', 0), pack('L', 1)) });
         my $port2 = fork_test_server(sub { check_and_reply($_[0], 17, pack('L', 0), pack('L', 2)) });
-        my $iproto1 = MR::IProto::XS->new(masters => ["127.0.0.1:$port1"]);
-        my $iproto2 = MR::IProto::XS->new(masters => ["127.0.0.1:$port2"]);
+        my $iproto1 = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port1"]);
+        my $iproto2 = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port2"]);
         my $resp = MR::IProto::XS->bulk([ { %$msg, iproto => $iproto1 }, { %$msg, iproto => $iproto2 } ]);
         is_deeply($resp, [ { error => 'ok', data => [ 1 ] }, { error => 'ok', data => [ 2 ] } ], "multicluster bulk");
     }
 
     {
         my $port = fork_test_server(sub { check_and_reply($_[0], 17, pack('L', 0), pack('L', 1)) });
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = MR::IProto::XS->do({ %$msg, iproto => $iproto });
         is_deeply($resp, { error => 'ok', data => [ 1 ] }, "multicluster do");
     }
@@ -626,7 +684,7 @@ sub check_multicluster {
 }
 
 sub check_pinger {
-    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' } };
+    my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' } };
 
     {
         my $port1 = fork_test_server(sub {
@@ -643,7 +701,7 @@ sub check_pinger {
         my $share = IPC::SharedMem->new(MR::Pinger::Const::SHM_KEY_FALL(), MR::Pinger::Const::SHM_SIZE(), 0666|IPC_CREAT) or die "Failed to create pinger shared memory";
         $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
 
-        my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
         my $resp = $iproto->bulk([$msg]);
         is_deeply($resp, [ { error => 'ok', data => [ 9 ] } ], "check pinger: blocked");
 
@@ -670,7 +728,7 @@ sub check_pinger {
         my $share = IPC::SharedMem->new(MR::Pinger::Const::SHM_KEY_FALL(), MR::Pinger::Const::SHM_SIZE(), 0666|IPC_CREAT) or die "Failed to create pinger shared memory";
         $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
 
-        my $iproto = MR::IProto::XS->new(masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
         my $resp = $iproto->bulk([$msg]);
         is_deeply($resp, [ { error => 'no server available' } ], "check pinger: all are blocked");
 
@@ -687,7 +745,7 @@ sub check_pinger {
 }
 
 sub check_fork {
-    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, max_tries => 1 };
+    my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' }, max_tries => 1 };
 
     {
         my $port = fork_test_server(
@@ -701,7 +759,7 @@ sub check_fork {
                 check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
             }
         );
-        my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk([$msg]);
         my $pid = fork();
         die "Failed to fork()" unless defined $pid;
@@ -722,12 +780,12 @@ sub check_fork {
 sub check_stat {
     my @stat;
     MR::IProto::XS::Stat->set_callback(sub { @stat = @_; return });
-    my $msg = { code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] } };
+    my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] } };
     my $port = fork_test_server(sub {
         my ($socket) = @_;
         check_and_reply($socket, 17, pack('L', 97), pack('L', 9)) for (1 .. 10);
     });
-    my $iproto = MR::IProto::XS->new(masters => ["127.0.0.1:$port"]);
+    my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
     $iproto->bulk([$msg]) for (1 .. 10);
     undef $iproto;
     ok(@stat == 4 && $stat[0] eq "call" && !defined $stat[1] && $stat[2] == 0 && $stat[2] eq "ok" && $stat[3]{count} == 10, "check stat callback");
@@ -743,13 +801,13 @@ sub check_singleton {
     }
 
     {
-        my $msg = { code => 17, request => { method => 'pack', format => 'Lw/a*L', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L' } };
+        my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'Lw/a*L', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L' } };
         my $resp = Test::Smth->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 13) ], "generic request througth singleton");
     }
 
     {
-        my $msg = { iproto => 'Test::Smth', code => 17, request => { method => 'pack', format => 'Lw/a*L', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L' } };
+        my $msg = { %msgopts, iproto => 'Test::Smth', code => 17, request => { method => 'pack', format => 'Lw/a*L', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L' } };
         my $resp = MR::IProto::XS->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 13) ], "generic request througth singleton called as class method");
     }
@@ -768,24 +826,27 @@ sub check_singleton {
 }
 
 sub check_leak {
-    no warnings 'redefine';
-    local *main::is = sub {};
-    local *main::ok = sub {};
-    local *main::cmp_ok = sub {};
-    local *main::isa_ok = sub {};
-    local *main::is_deeply = sub {};
-    no_leaks_ok { check_new() } "constructor not leaks";
-    no_leaks_ok { check_errors() } "error handling not leaks";
-    no_leaks_ok { check_success() } "success query not leaks";
-    no_leaks_ok { check_early_retry() } "early retry not leaks";
-    no_leaks_ok { check_retry() } "retry not leaks";
-    no_leaks_ok { check_soft_retry() } "soft retry not leaks";
-    no_leaks_ok { check_timeout() } "timeout not leaks";
-    no_leaks_ok { check_replica() } "replica not leaks";
-    no_leaks_ok { check_priority() } "priority not leaks";
-    no_leaks_ok { check_multicluster() } "multicluster not leaks";
-    no_leaks_ok { check_pinger() } "pinger not leaks";
-    no_leaks_ok { check_stat() } "stat not leaks";
-    no_leaks_ok { check_singleton() } "singleton not leaks";
+    SKIP: {
+        skip "valgrind: too long to check leaks", 13 if $valgrind;
+        no warnings 'redefine';
+        local *main::is = sub {};
+        local *main::ok = sub {};
+        local *main::cmp_ok = sub {};
+        local *main::isa_ok = sub {};
+        local *main::is_deeply = sub {};
+        no_leaks_ok { check_new() } "constructor not leaks";
+        no_leaks_ok { check_errors() } "error handling not leaks";
+        no_leaks_ok { check_success() } "success query not leaks";
+        no_leaks_ok { check_early_retry() } "early retry not leaks";
+        no_leaks_ok { check_retry() } "retry not leaks";
+        no_leaks_ok { check_soft_retry() } "soft retry not leaks";
+        no_leaks_ok { check_timeout() } "timeout not leaks";
+        no_leaks_ok { check_replica() } "replica not leaks";
+        no_leaks_ok { check_priority() } "priority not leaks";
+        no_leaks_ok { check_multicluster() } "multicluster not leaks";
+        no_leaks_ok { check_pinger() } "pinger not leaks";
+        no_leaks_ok { check_stat() } "stat not leaks";
+        no_leaks_ok { check_singleton() } "singleton not leaks";
+    }
     return;
 }

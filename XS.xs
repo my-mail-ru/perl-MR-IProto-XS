@@ -503,6 +503,8 @@ ixs_new(klass, ...)
     PREINIT:
         HV *shards_config = NULL;
         bool implicit_shard = false;
+        SV *connect_timeout = NULL;
+        SV *server_freeze = NULL;
     CODE:
         if (items % 2 == 0)
             croak("Odd number of elements in hash assignment");
@@ -528,12 +530,23 @@ ixs_new(klass, ...)
                 elem = hv_fetch(shards_config, "1", 1, 0);
                 if (!elem) croak("Impossible");
                 (void)hv_store((HV*)SvRV(*elem), key, strlen(key), SvREFCNT_inc(value), 0);
+            } else if (strcmp(key, "connect_timeout") == 0) {
+                connect_timeout = value;
+            } else if (strcmp(key, "server_freeze") == 0) {
+                server_freeze = value;
             }
         }
         if (!shards_config)
             croak("Argument \"shards\" or \"masters\" should be specified");
         iproto_cluster_t *cluster = iproto_cluster_init();
         iprotoxs_cluster_set_shards(cluster, shards_config);
+        if (connect_timeout || server_freeze) {
+            iproto_cluster_opts_t *opts = iproto_cluster_options(cluster);
+            if (connect_timeout)
+                iprotoxs_timeval_set(connect_timeout, &opts->connect_timeout);
+            if (server_freeze)
+                iprotoxs_timeval_set(server_freeze, &opts->server_freeze);
+        }
         RETVAL = newSV(0);
         sv_setref_pv(RETVAL, SvPV_nolen(klass), cluster);
         if (ix == 1) {
