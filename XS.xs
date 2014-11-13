@@ -4,22 +4,84 @@
 
 #include "ppport.h"
 
+#include <EVAPI.h>
+
 #include <iprotocluster.h>
+#include <iproto_evapi.h>
 #include "iprotoxs.h"
+
+static ev_io *xev_io_new(void (*cb)(struct ev_loop *, ev_io *, int)) {
+    ev_io *io = malloc(sizeof(*io));
+    ev_init(io, cb);
+    return io;
+}
+
+static void xev_io_free(ev_io *io) {
+    free(io);
+}
+
+static void xev_io_set(ev_io *io, int fd, int events) {
+    ev_io_set(io, fd, events);
+}
+
+static void xev_io_get(ev_io *io, int *fd, int *events) {
+    *fd = io->fd;
+    *events = io->events;
+}
+
+static void xev_io_set_data(ev_io *io, void *data) {
+    io->data = data;
+}
+
+static void *xev_io_data(ev_io *io) {
+    return io->data;
+}
+
+static ev_timer *xev_timer_new(void (*cb)(struct ev_loop *, ev_timer *, int)) {
+    ev_timer *timer = malloc(sizeof(*timer));
+    ev_init(timer, cb);
+    return timer;
+}
+
+static void xev_timer_free(ev_timer *timer) {
+    free(timer);
+}
+
+static void xev_timer_set(ev_timer *timer, ev_tstamp after, ev_tstamp repeat) {
+    ev_timer_set(timer, after, repeat);
+}
+
+static void xev_timer_set_data(ev_timer *timer, void *data) {
+    timer->data = data;
+}
+
+static void *xev_timer_data(ev_timer *timer) {
+    return timer->data;
+}
 
 #define MY_CXT_KEY "MR::IProto::XS::_guts" XS_VERSION
 
 typedef struct {
     HV *singletons;
     SV *stat_callback;
-    HV *soft_retry_callbacks;
     CV *unpack;
     SV *logfunc;
+    SV *loop;
 } my_cxt_t;
 
 START_MY_CXT;
 
 typedef SV * MR__IProto__XS;
+typedef SV * EV__Loop;
+
+typedef struct {
+    SV *callback;
+    SV *soft_retry_callback;
+    HV *request;
+    SV *data;
+} iprotoxs_data_t;
+
+HV *iprotoxs_message_to_hv(iproto_message_t *message, HV *request);
 
 static void iprotoxs_logfunc_warn(iproto_logmask_t mask, const char *str) {
     char *level;
@@ -80,11 +142,28 @@ static void iprotoxs_stat_callback(const char *type, const char *server, uint32_
     LEAVE;
 }
 
+static void iprotoxs_callback(iproto_message_t *message) {
+    iprotoxs_data_t *data = (iprotoxs_data_t *)iproto_message_options(message)->data;
+    SV *callback = SvREFCNT_inc(data->callback);
+    dSP;
+    ENTER;
+    SAVETMPS;
+    PUSHMARK(SP);
+    mXPUSHs(newRV_noinc((SV *)iprotoxs_message_to_hv(message, data->request)));
+    PUTBACK;
+    call_sv(callback, G_EVAL|G_DISCARD);
+    SPAGAIN;
+    if (SvTRUE(ERRSV)) {
+        warn("MR::IProto::XS: died in callback: %s", SvPV_nolen(ERRSV));
+    }
+    FREETMPS;
+    LEAVE;
+    SvREFCNT_dec(callback);
+}
+
 static bool iprotoxs_soft_retry_callback(iproto_message_t *message) {
-    dMY_CXT;
-    SV **val = hv_fetch(MY_CXT.soft_retry_callbacks, (char *)&message, sizeof(message), 0);
-    if (!val) return false;
-    SV *callback = SvRV(*val);
+    SV *callback = ((iprotoxs_data_t *)iproto_message_options(message)->data)->soft_retry_callback;
+    if (!callback) return false;
     size_t size;
     bool replica;
     void *data = iproto_message_response(message, &size, &replica);
@@ -104,6 +183,54 @@ static bool iprotoxs_soft_retry_callback(iproto_message_t *message) {
     FREETMPS;
     LEAVE;
     return result;
+}
+
+// Keep previous behaviour
+static SV *iprotoxs_internal_loop(void) {
+    dSP;
+    ENTER;
+    SAVETMPS;
+    PUSHMARK(SP);
+    mXPUSHp("EV::Loop", 8);
+    PUTBACK;
+    call_method("new", G_SCALAR);
+    SPAGAIN;
+    SV *loop = SvREFCNT_inc(POPs);
+    PUTBACK;
+    FREETMPS;
+    LEAVE;
+    return loop;
+}
+
+static void iprotoxs_set_evapi(SV *loop) {
+    iproto_evapi_t iproto_evapi = {
+        .version = IPROTO_EVAPI_VERSION,
+        .revision = IPROTO_EVAPI_REVISION,
+        .loop = (struct ev_loop *)SvIVX(SvRV(loop)),
+        .loop_fork = GEVAPI->loop_fork,
+        .now_update = GEVAPI->now_update,
+        .run = GEVAPI->run,
+        .break_ = GEVAPI->break_,
+        .suspend = GEVAPI->suspend,
+        .resume = GEVAPI->resume,
+        .io_new = xev_io_new,
+        .io_free = xev_io_free,
+        .io_set = xev_io_set,
+        .io_get = xev_io_get,
+        .io_set_data = xev_io_set_data,
+        .io_data = xev_io_data,
+        .io_start = GEVAPI->io_start,
+        .io_stop = GEVAPI->io_stop,
+        .timer_new = xev_timer_new,
+        .timer_free = xev_timer_free,
+        .timer_set = xev_timer_set,
+        .timer_set_data = xev_timer_set_data,
+        .timer_data = xev_timer_data,
+        .timer_start = GEVAPI->timer_start,
+        .timer_stop = GEVAPI->timer_stop,
+        .timer_again = GEVAPI->timer_again
+    };
+    iproto_set_evapi(&iproto_evapi);
 }
 
 static void iprotoxs_servers_set(iproto_shard_t *shard, bool is_replica, AV *config) {
@@ -218,7 +345,7 @@ static XS(iprotoxs_unpack_wrapper) {
     return;
 }
 
-char *iprotoxs_pack_data(HV *opts, STRLEN *length) {
+static SV *iprotoxs_pack_data(HV *opts) {
     SV **sv = hv_fetch(opts, "format", 6, 0);
     if (!(sv && SvPOK(*sv)))
         croak("\"format\" should be a SCALAR if method \"pack\" is used");
@@ -233,7 +360,7 @@ char *iprotoxs_pack_data(HV *opts, STRLEN *length) {
     SV *cat = sv_2mortal(newSVpv("", 0));
     SvUTF8_off(cat);
     packlist(cat, format, format + formatlen, list, list + listlen);
-    return SvPV(cat, (*length));
+    return cat;
 }
 
 AV *iprotoxs_unpack_data(HV *opts, char *data, STRLEN length, SV *errsv) {
@@ -389,6 +516,7 @@ iproto_message_t *iprotoxs_hv_to_message(HV *request) {
 
     void *data;
     size_t size;
+    SV *datasv = NULL;
     val = hv_fetch(request, "request", 7, 0);
     if (!val) croak("\"request\" should be specified");
     if (SvPOK(*val)) {
@@ -400,7 +528,8 @@ iproto_message_t *iprotoxs_hv_to_message(HV *request) {
         if (!SvPOK(*sv)) croak("\"method\" should be a SCALAR");
         char *method = SvPV_nolen(*sv);
         if (strcmp(method, "pack") == 0) {
-            data = iprotoxs_pack_data(hv, &size);
+            datasv = iprotoxs_pack_data(hv);
+            data = SvPV(datasv, size);
         } else {
             croak("invalid \"method\" value");
         }
@@ -413,13 +542,28 @@ iproto_message_t *iprotoxs_hv_to_message(HV *request) {
     iproto_message_opts_t *opts = iproto_message_options(message);
     iprotoxs_parse_opts(opts, request);
 
+    iprotoxs_data_t *optsdata;
+    Newxz(optsdata, 1, iprotoxs_data_t);
+
+    if ((val = hv_fetch(request, "callback", 8, 0))) {
+        if (!(SvROK(*val) || SvTYPE(SvRV(*val)) == SVt_PVCV))
+            croak("\"callback\" should be a CODEREF");
+        opts->callback = iprotoxs_callback;
+        optsdata->request = (HV *)SvREFCNT_inc((SV *)request);
+        optsdata->callback = SvREFCNT_inc(*val);
+    }
+
     if ((val = hv_fetch(request, "soft_retry_callback", 19, 0))) {
         if (!(SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVCV))
             croak("\"soft_retry_callback\" should be a CODEREF");
         opts->soft_retry_callback = iprotoxs_soft_retry_callback;
-        dMY_CXT;
-        (void)hv_store(MY_CXT.soft_retry_callbacks, (char *)&message, sizeof(message), SvREFCNT_inc(*val), 0);
+        optsdata->soft_retry_callback = SvREFCNT_inc(*val);
     }
+
+    if (datasv)
+        optsdata->data = SvREFCNT_inc(datasv);
+
+    opts->data = optsdata;
 
     return message;
 }
@@ -473,6 +617,18 @@ HV *iprotoxs_message_to_hv(iproto_message_t *message, HV *request) {
         if (hv_store(request, "error", 5, errsv, 0))
             SvREFCNT_inc(errsv);
     }
+
+    iprotoxs_data_t *optsdata = (iprotoxs_data_t *)iproto_message_options(message)->data;
+    if (optsdata->callback) {
+        SvREFCNT_dec(optsdata->callback);
+        SvREFCNT_dec(optsdata->request);
+    }
+    if (optsdata->soft_retry_callback)
+        SvREFCNT_dec(optsdata->soft_retry_callback);
+    if (optsdata->data)
+        SvREFCNT_dec(optsdata->data);
+    Safefree(optsdata);
+
     iproto_message_free(message);
     return result;
 }
@@ -482,8 +638,11 @@ MODULE = MR::IProto::XS		PACKAGE = MR::IProto::XS		PREFIX = ixs_
 PROTOTYPES: ENABLE
 
 BOOT:
+    I_EV_API("MR::IProto::XS");
     iproto_initialize();
     iproto_set_logfunc(iprotoxs_logfunc_warn);
+    SV *loop = iprotoxs_internal_loop();
+    iprotoxs_set_evapi(loop);
     HV *stash = gv_stashpv("MR::IProto::XS", 1);
 #define IPROTOXS_CONST(s, ...) newCONSTSUB(stash, #s, newSVuv(s));
     IPROTO_ALL_ERROR_CODES(IPROTOXS_CONST);
@@ -492,8 +651,8 @@ BOOT:
     MY_CXT_INIT;
     MY_CXT.singletons = newHV();
     MY_CXT.stat_callback = NULL;
-    MY_CXT.soft_retry_callbacks = newHV();
     MY_CXT.unpack = newXS(NULL, iprotoxs_unpack_wrapper, __FILE__);
+    MY_CXT.loop = loop;
 
 MR::IProto::XS
 ixs_new(klass, ...)
@@ -612,12 +771,12 @@ ixs_bulk(iprotoxs, list, ...)
         RETVAL = newAV();
         for (int i = 0; i < nmessages; i++) {
             SV **sv = av_fetch(list, i, 0);
-            av_push(RETVAL, newRV_noinc((SV*)iprotoxs_message_to_hv(messages[i], (HV *)SvRV(*sv))));
+            iproto_message_opts_t *opts = iproto_message_options(messages[i]);
+            av_push(RETVAL, opts->callback ? &PL_sv_undef
+                : newRV_noinc((SV*)iprotoxs_message_to_hv(messages[i], (HV *)SvRV(*sv))));
         }
         sv_2mortal((SV*)RETVAL);
         Safefree(messages);
-        dMY_CXT;
-        hv_clear(MY_CXT.soft_retry_callbacks);
     OUTPUT:
         RETVAL
 
@@ -633,9 +792,10 @@ ixs_do(iprotoxs, request, ...)
         }
         iproto_message_t *message = iprotoxs_hv_to_message(request);
         iproto_do(message, timeout);
+        iproto_message_opts_t *opts = iproto_message_options(message);
+        if (opts->callback)
+            XSRETURN_UNDEF;
         RETVAL = (HV *)sv_2mortal((SV *)iprotoxs_message_to_hv(message, request));
-        dMY_CXT;
-        hv_clear(MY_CXT.soft_retry_callbacks);
     OUTPUT:
         RETVAL
 
@@ -673,6 +833,16 @@ ixs_set_logfunc(klass, callback)
             MY_CXT.logfunc = NULL;
             iproto_set_logfunc(iprotoxs_logfunc_warn);
         }
+
+void
+ixs_set_ev_loop(klass, loop)
+        EV::Loop loop
+    CODE:
+        dMY_CXT;
+        if (MY_CXT.loop)
+            SvREFCNT_dec(MY_CXT.loop);
+        MY_CXT.loop = SvREFCNT_inc(loop);
+        iprotoxs_set_evapi(loop);
 
 MODULE = MR::IProto::XS		PACKAGE = MR::IProto::XS::Stat		PREFIX = ixs_stat_
 

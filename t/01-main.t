@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 85;
+use Test::More tests => 86;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use IO::Socket;
@@ -11,18 +11,29 @@ use MR::Pinger::Const;
 use IPC::SysV qw/IPC_CREAT/;
 use IPC::SharedMem;
 
-my $valgrind;
-GetOptions('valgrind!' => \$valgrind);
+use AnyEvent;
+
+my ($valgrind, $default_loop, $pinger, $time);
+GetOptions(
+    'valgrind!'     => \$valgrind,
+    'default-loop!' => \$default_loop,
+    'pinger!'       => \$pinger,
+    'time!'         => \$time,
+);
 my (%newopts, %msgopts);
 if ($valgrind) {
     $newopts{connect_timeout} = 2;
     $msgopts{timeout} = 2;
 }
 
+$SIG{CHLD} = 'IGNORE';
+
 BEGIN { use_ok('MR::IProto::XS') };
 
+MR::IProto::XS->set_ev_loop(EV::default_loop) if $default_loop;
+
 MR::IProto::XS->set_logmask(MR::IProto::XS::LOG_NOTHING);
-ok(MR::IProto::XS::Stat->set_graphite("alei9.mail.ru", 2005, "my.iproto-xs"), "set_graphite") or diag($!);
+ok(MR::IProto::XS::Stat->set_graphite("graphite.mydev.mail.ru", 2005, "my.iproto-xs"), "set_graphite") or diag($!);
 
 isa_ok(MR::IProto::XS->new(%newopts, shards => {}), 'MR::IProto::XS');
 
@@ -50,15 +61,18 @@ check_pinger();
 check_fork();
 check_stat();
 check_singleton();
+check_async();
 check_leak();
 
 sub fork_test_server {
     my (@cb) = @_;
     my $port = $PORT++;
     my $parent = $$;
+    pipe(my $read, my $write);
     my $pid = fork();
     die "Failed to fork(): $!\n" unless defined $pid;
     if ($pid == 0) {
+        close $read;
         my $socket = IO::Socket::INET->new(
             Listen    => 5,
             LocalHost => '127.0.0.1',
@@ -70,16 +84,19 @@ sub fork_test_server {
             kill SIGTERM, $parent;
             exit 1;
         };
+        close $write;
+        $SIG{CHLD} = 'DEFAULT';
         my %childs;
         foreach my $cb (@cb) {
             if (my $accept = $socket->accept()) {
                 my $apid = fork();
                 if ($apid == 0) {
                     $socket->close();
-                    eval { $cb->($accept); 1 } or warn "Died in callback: $@";
-                    my $len = $accept->sysread(my $eof, 1);
-                    if ($len == -1 ) {
-                        warn "Failed to read EOF";
+                    my $close;
+                    eval { $cb->($accept, $close); 1 } or warn "Died in callback: $@";
+                    unless ($close) {
+                        my $len = $accept->sysread(my $eof, 1);
+                        warn "Failed to read EOF: $!" unless defined $len;
                     }
                     $accept->close();
                     exit;
@@ -87,6 +104,8 @@ sub fork_test_server {
                     $childs{$apid} = 1;
                     $accept->close();
                 }
+            } else {
+                redo;
             }
         }
         while (%childs) {
@@ -96,8 +115,10 @@ sub fork_test_server {
         exit;
     }
     push @servers, $pid;
-    sleep 0.5;
-    sleep 1.5 if $valgrind;
+    close $write;
+    read $read, my $buf, 1;
+    close $read;
+    sleep $valgrind ? 1.0 : 0.2;
     return $port;
 }
 
@@ -108,11 +129,14 @@ sub close_all_servers {
 }
 
 sub check_and_reply {
-    my ($socket, $ccode, $cdata, $reply) = @_;
+    my ($socket, $ccode, $cdata, $reply, $eof_is_ok) = @_;
     my $header;
     my $len = $socket->sysread($header, 12);
     die "Failed to read: $!" if $len == -1;
-    die "EOF" if $len == 0;
+    if ($len == 0) {
+        die "EOF" unless $eof_is_ok;
+        return;
+    }
     die "Invalid header length" unless $len == 12;
     my ($code, $length, $sync) = unpack 'LLL', $header;
     die "Invalid code" unless $code == $ccode;
@@ -332,7 +356,7 @@ sub check_success {
     {
         my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L*' } };
         my $port = fork_test_server(
-            sub { check_and_reply($_[0], 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 13); $_[0]->close },
+            sub { check_and_reply($_[0], 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 13); $_[1] = 1 },
             sub { check_and_reply($_[0], 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 13) },
         );
         my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
@@ -356,10 +380,13 @@ sub check_early_retry {
         my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"], ["127.0.0.1:$EMPTY_PORT"]]);
         my $start = time();
         my $resp = $iproto->bulk(msgs($msg, (11 .. 13)));
+        my $duration = time() - $start;
         is_deeply($resp, [ map {{ error => 'ok', data => [ $_ ] }} (11 .. 13) ], "early retry");
         SKIP: {
             skip "valgrind: time is useless", 1 if $valgrind;
-            is(sprintf('%.02f', time() - $start), '0.06', "early retry time");
+            skip "time checks are disabled", 1 unless $time;
+            ok($duration > 0.050 && $duration < 0.070, "early retry time")
+                or diag("(0.050 < $duration < 0.070)");
         }
     }
 
@@ -369,10 +396,13 @@ sub check_early_retry {
         my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
         my $start = time();
         my $resp = $iproto->bulk(msgs($msg, (11 .. 13)));
+        my $duration = time() - $start;
         is_deeply($resp, [ map {{ error => 'ok', data => [ $_ ] }} (11 .. 13) ], "early retry with less servers");
         SKIP: {
             skip "valgrind: time is useless", 1 if $valgrind;
-            is(sprintf('%.02f', time() - $start), '0.06', "early retry with less servers time");
+            skip "time checks are disabled", 1 unless $time;
+            ok($duration > 0.050 && $duration < 0.070, "early retry with less servers time")
+                or diag("(0.050 < $duration < 0.070)");
         }
     }
 
@@ -381,10 +411,13 @@ sub check_early_retry {
         my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $start = time();
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
+        my $duration = time() - $start;
         is_deeply($resp, [ map {{ error => 'timeout' }} (1 .. 3) ], "early retry with no servers");
         SKIP: {
             skip "valgrind: time is useless", 1 if $valgrind;
-            is(sprintf('%.02f', time() - $start), '0.50', "early retry with no servers time");
+            skip "time checks are disabled", 1 unless $time;
+            ok($duration > 0.500 && $duration < 0.520, "early retry with no servers time")
+                or diag("(0.500 < $duration < 0.520)");
         }
     }
 
@@ -504,10 +537,13 @@ sub check_soft_retry {
         my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $start = time();
         my $resp = $iproto->bulk([$msg]);
+        my $duration = time() - $start;
         is_deeply($resp, [ { error => 'ok', data => [ 9 ] } ], "soft_retry - want");
         SKIP: {
             skip "valgrind: time is useless", 1 if $valgrind;
-            is(sprintf('%.01f', time() - $start), '0.1', "soft_retry - retry time");
+            skip "time checks are disabled", 1 unless $time;
+            ok($duration > 0.100 && $duration < 0.150, "soft_retry - retry time")
+                or diag("(0.100 < $duration < 0.150)");
         }
     }
 
@@ -515,7 +551,7 @@ sub check_soft_retry {
         my $port = fork_test_server(sub {
             my ($socket) = @_;
             check_and_reply($socket, 17, pack('L', 97), pack('L', 13));
-            check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 9), 1);
         });
         my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk([$msg]);
@@ -533,10 +569,13 @@ sub check_soft_retry {
         local $msg->{max_tries} = 6;
         my $start = time();
         my $resp = $iproto->bulk([$msg]);
+        my $duration = time() - $start;
         is_deeply($resp, [ { error => 'ok', data => [ 9 ] } ], "soft_retry - want twice");
         SKIP: {
             skip "valgrind: time is useless", 1 if $valgrind;
-            is(sprintf('%.01f', time() - $start), '0.4', "soft_retry - twice retry time");
+            skip "time checks are disabled", 1 unless $time;
+            ok($duration > 0.400 && $duration < 0.470, "soft_retry - twice retry time")
+                or diag("(0.400 < $duration < 0.470)");
         }
     }
 
@@ -546,15 +585,18 @@ sub check_soft_retry {
             check_and_reply($socket, 17, pack('L', 97), pack('L', 12));
             check_and_reply($socket, 17, pack('L', 97), pack('L', 12));
             check_and_reply($socket, 17, pack('L', 97), pack('L', 12));
-            check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
+            check_and_reply($socket, 17, pack('L', 97), pack('L', 9), 1);
         });
         my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $start = time();
         my $resp = $iproto->bulk([$msg]);
+        my $duration = time() - $start;
         is_deeply($resp, [ { error => 'ok', data => [ 12 ] } ], "soft_retry - want max");
         SKIP: {
             skip "valgrind: time is useless", 1 if $valgrind;
-            is(sprintf('%.01f', time() - $start), '1.0', "soft_retry - max retry time");
+            skip "time checks are disabled", 1 unless $time;
+            ok($duration > 1.000 && $duration < 1.100, "soft_retry - max retry time")
+                or diag("(1.000 < $duration < 1.100)");
         }
     }
 
@@ -684,63 +726,67 @@ sub check_multicluster {
 }
 
 sub check_pinger {
-    my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' } };
+    SKIP: {
+        skip "pinger checks are disabled", 4  unless $pinger;
 
-    {
-        my $port1 = fork_test_server(sub {
-            my ($socket) = @_;
-            check_and_reply($socket, 17, pack('L', 97), pack('L', 8));
-        });
-        my $port2 = fork_test_server(sub {
-            my ($socket) = @_;
-            check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
-        });
+        my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'L', data => [ 97 ] }, response => { method => 'unpack', format => 'L' } };
 
-        sleep 1;
-        my $pinger_string = "lwp:xxx,iproto:127.0.0.1:$port1,iproto:127.0.0.1:29998\0";
-        my $share = IPC::SharedMem->new(MR::Pinger::Const::SHM_KEY_FALL(), MR::Pinger::Const::SHM_SIZE(), 0666|IPC_CREAT) or die "Failed to create pinger shared memory";
-        $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
+        {
+            my $port1 = fork_test_server(sub {
+                my ($socket) = @_;
+                check_and_reply($socket, 17, pack('L', 97), pack('L', 8));
+            });
+            my $port2 = fork_test_server(sub {
+                my ($socket) = @_;
+                check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
+            });
 
-        my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
-        my $resp = $iproto->bulk([$msg]);
-        is_deeply($resp, [ { error => 'ok', data => [ 9 ] } ], "check pinger: blocked");
+            sleep 1;
+            my $pinger_string = "lwp:xxx,iproto:127.0.0.1:$port1,iproto:127.0.0.1:29998\0";
+            my $share = IPC::SharedMem->new(MR::Pinger::Const::SHM_KEY_FALL(), MR::Pinger::Const::SHM_SIZE(), 0666|IPC_CREAT) or die "Failed to create pinger shared memory";
+            $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
 
-        sleep 1;
-        $pinger_string = "lwp:xxx,iproto:127.0.0.1:29998\0";
-        $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
+            my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
+            my $resp = $iproto->bulk([$msg]);
+            is_deeply($resp, [ { error => 'ok', data => [ 9 ] } ], "check pinger: blocked");
 
-        $resp = $iproto->bulk([$msg]);
-        is_deeply($resp, [ { error => 'ok', data => [ 8 ] } ], "check pinger: unblocked");
+            sleep 1;
+            $pinger_string = "lwp:xxx,iproto:127.0.0.1:29998\0";
+            $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
+
+            $resp = $iproto->bulk([$msg]);
+            is_deeply($resp, [ { error => 'ok', data => [ 8 ] } ], "check pinger: unblocked");
+        }
+
+        {
+            my $port1 = fork_test_server(sub {
+                my ($socket) = @_;
+                check_and_reply($socket, 17, pack('L', 97), pack('L', 8));
+            });
+            my $port2 = fork_test_server(sub {
+                my ($socket) = @_;
+                check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
+            });
+
+            sleep 1;
+            my $pinger_string = "lwp:xxx,iproto:127.0.0.1:$port1,iproto:127.0.0.1:$port2\0";
+            my $share = IPC::SharedMem->new(MR::Pinger::Const::SHM_KEY_FALL(), MR::Pinger::Const::SHM_SIZE(), 0666|IPC_CREAT) or die "Failed to create pinger shared memory";
+            $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
+
+            my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
+            my $resp = $iproto->bulk([$msg]);
+            is_deeply($resp, [ { error => 'no server available' } ], "check pinger: all are blocked");
+
+            sleep 1;
+            $pinger_string = "lwp:xxx,iproto:127.0.0.1:29998\0";
+            $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
+
+            $resp = $iproto->bulk([$msg]);
+            is_deeply($resp, [ { error => 'ok', data => [ 8 ] } ], "check pinger: all are unblocked");
+        }
+
+        close_all_servers();
     }
-
-    {
-        my $port1 = fork_test_server(sub {
-            my ($socket) = @_;
-            check_and_reply($socket, 17, pack('L', 97), pack('L', 8));
-        });
-        my $port2 = fork_test_server(sub {
-            my ($socket) = @_;
-            check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
-        });
-
-        sleep 1;
-        my $pinger_string = "lwp:xxx,iproto:127.0.0.1:$port1,iproto:127.0.0.1:$port2\0";
-        my $share = IPC::SharedMem->new(MR::Pinger::Const::SHM_KEY_FALL(), MR::Pinger::Const::SHM_SIZE(), 0666|IPC_CREAT) or die "Failed to create pinger shared memory";
-        $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
-
-        my $iproto = MR::IProto::XS->new(%newopts, masters => [["127.0.0.1:$port1"], ["127.0.0.1:$port2"]]);
-        my $resp = $iproto->bulk([$msg]);
-        is_deeply($resp, [ { error => 'no server available' } ], "check pinger: all are blocked");
-
-        sleep 1;
-        $pinger_string = "lwp:xxx,iproto:127.0.0.1:29998\0";
-        $share->write($pinger_string, 0, length($pinger_string)) or die "Filed to write to shared memory";
-
-        $resp = $iproto->bulk([$msg]);
-        is_deeply($resp, [ { error => 'ok', data => [ 8 ] } ], "check pinger: all are unblocked");
-    }
-
-    close_all_servers();
     return;
 }
 
@@ -752,13 +798,14 @@ sub check_fork {
             sub {
                 my ($socket) = @_;
                 check_and_reply($socket, 17, pack('L', 97), pack('L', 7));
-                check_and_reply($socket, 17, pack('L', 97), pack('L', 8));
+                check_and_reply($socket, 17, pack('L', 97), pack('L', 8), 1);
             },
             sub {
                 my ($socket) = @_;
                 check_and_reply($socket, 17, pack('L', 97), pack('L', 9));
             }
         );
+        local $SIG{CHLD} = 'DEFAULT';
         my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk([$msg]);
         my $pid = fork();
@@ -825,6 +872,27 @@ sub check_singleton {
     return;
 }
 
+sub check_async {
+    SKIP: {
+        skip "cannot check async when internal loop is used", 1 unless $default_loop;
+        my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L*' } };
+        my $port = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, pack('Lw/a*L', 89, 'test', 15), pack('w/a*L', 'test', $_)) foreach (11 .. 23);
+        });
+        my @resp;
+        my $cv = AnyEvent->condvar;
+        $msg->{callback} = sub { push @resp, $_[0]; $cv->end() };
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
+        $cv->begin() for (11 .. 23);
+        $iproto->bulk([ map $msg, (11 .. 18)]);
+        $iproto->bulk([ map $msg, (19 .. 23)]);
+        $cv->recv();
+        is_deeply(\@resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 23) ], "async request");
+    }
+    return;
+}
+
 sub check_leak {
     SKIP: {
         skip "valgrind: too long to check leaks", 13 if $valgrind;
@@ -834,6 +902,8 @@ sub check_leak {
         local *main::cmp_ok = sub {};
         local *main::isa_ok = sub {};
         local *main::is_deeply = sub {};
+        local *main::diag = sub {};
+        local *main::skip = sub { no warnings 'exiting'; last SKIP };
         no_leaks_ok { check_new() } "constructor not leaks";
         no_leaks_ok { check_errors() } "error handling not leaks";
         no_leaks_ok { check_success() } "success query not leaks";

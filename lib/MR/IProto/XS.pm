@@ -4,6 +4,8 @@ use 5.008008;
 use strict;
 use warnings;
 
+use EV ();
+
 our $VERSION = '0.01';
 
 require XSLoader;
