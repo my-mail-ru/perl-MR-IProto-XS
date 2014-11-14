@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 86;
+use Test::More tests => 87;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use IO::Socket;
@@ -886,9 +886,11 @@ sub check_async {
         my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         $cv->begin() for (11 .. 23);
         $iproto->bulk([ map $msg, (11 .. 18)]);
-        $iproto->bulk([ map $msg, (19 .. 23)]);
+        $iproto->bulk([ map $msg, (19 .. 22)]);
+        $iproto->do($msg);
         $cv->recv();
         is_deeply(\@resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 23) ], "async request");
+        close_all_servers();
     }
     return;
 }
@@ -917,6 +919,7 @@ sub check_leak {
         no_leaks_ok { check_pinger() } "pinger not leaks";
         no_leaks_ok { check_stat() } "stat not leaks";
         no_leaks_ok { check_singleton() } "singleton not leaks";
+        no_leaks_ok { check_async() } "async not leaks";
     }
     return;
 }
