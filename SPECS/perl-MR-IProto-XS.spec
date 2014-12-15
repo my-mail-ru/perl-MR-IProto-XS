@@ -1,6 +1,5 @@
 %bcond_without graphite
 
-%define _prefix /usr/local
 %define __libiprotocluster_version 20141113.1839
 
 Name:           perl-MR-IProto-XS
