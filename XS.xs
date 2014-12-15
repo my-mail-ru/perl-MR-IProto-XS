@@ -10,6 +10,11 @@
 #include <iproto_evapi.h>
 #include "iprotoxs.h"
 
+/* compatibility with libev 4.15 and newer */
+static void xev_run(struct ev_loop *loop, int flags) {
+    ev_run(loop, flags);
+}
+
 static ev_io *xev_io_new(void (*cb)(struct ev_loop *, ev_io *, int)) {
     ev_io *io = malloc(sizeof(*io));
     ev_init(io, cb);
@@ -209,7 +214,7 @@ static void iprotoxs_set_evapi(SV *loop) {
         .loop = (struct ev_loop *)SvIVX(SvRV(loop)),
         .loop_fork = GEVAPI->loop_fork,
         .now_update = GEVAPI->now_update,
-        .run = GEVAPI->run,
+        .run = xev_run,
         .break_ = GEVAPI->break_,
         .suspend = GEVAPI->suspend,
         .resume = GEVAPI->resume,
