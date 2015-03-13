@@ -3,6 +3,7 @@ use strict;
 use warnings;
 use ExtUtils::MakeMaker;
 use EV::MakeMaker 'ev_args';
+use Coro::MakeMaker 'coro_args';
 use Getopt::Long;
 use File::Spec;
 
@@ -15,7 +16,7 @@ GetOptions(
 my $define = join ' ',
     $graphite ? '-DWITH_GRAPHITE' : ();
 
-WriteMakefile(ev_args(
+WriteMakefile(coro_args(ev_args(
     NAME              => 'MR::IProto::XS',
     VERSION_FROM      => 'lib/MR/IProto/XS.pm', # finds $VERSION
     PREREQ_PM         => {}, # e.g., Module::Name => 1.1
@@ -29,4 +30,4 @@ WriteMakefile(ev_args(
     # OBJECT            => '$(O_FILES)', # link all the C files too
     CCFLAGS           => '-std=gnu99 -Wall -Werror',
     OPTIMIZE          => '-ggdb3',
-));
+)));

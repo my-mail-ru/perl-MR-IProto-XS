@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 87;
+use Test::More tests => 88;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use IO::Socket;
@@ -13,13 +13,23 @@ use IPC::SharedMem;
 
 use AnyEvent;
 
-my ($valgrind, $default_loop, $pinger, $time);
-GetOptions(
-    'valgrind!'     => \$valgrind,
-    'default-loop!' => \$default_loop,
-    'pinger!'       => \$pinger,
-    'time!'         => \$time,
-);
+my ($valgrind, $ev, $coro, $pinger, $time);
+BEGIN {
+    GetOptions(
+        'valgrind!'     => \$valgrind,
+        'ev!'           => \$ev,
+        'coro!'         => \$coro,
+        'pinger!'       => \$pinger,
+        'time!'         => \$time,
+    );
+    if ($coro) {
+        require Coro;
+        import Coro;
+    } elsif ($ev) {
+        require EV;
+        import EV;
+    }
+}
 my (%newopts, %msgopts);
 if ($valgrind) {
     $newopts{connect_timeout} = 2;
@@ -30,12 +40,14 @@ $SIG{CHLD} = 'IGNORE';
 
 BEGIN { use_ok('MR::IProto::XS') };
 
-MR::IProto::XS->set_ev_loop(EV::default_loop) if $default_loop;
+Coro::async(sub { AnyEvent->condvar->recv() }) if $coro;
 
 MR::IProto::XS->set_logmask(MR::IProto::XS::LOG_NOTHING);
 ok(MR::IProto::XS::Stat->set_graphite("graphite.mydev.mail.ru", 2005, "my.iproto-xs"), "set_graphite") or diag($!);
 
 isa_ok(MR::IProto::XS->new(%newopts, shards => {}), 'MR::IProto::XS');
+
+is(MR::IProto::XS->engine, $coro ? 'coro' : $ev ? 'ev' : 'internal', 'engine');
 
 my $PORT = $ENV{FIRST_PORT} || 40000;
 my $EMPTY_PORT = $ENV{EMPTY_PORT} || 19999;
@@ -837,6 +849,7 @@ sub check_stat {
     undef $iproto;
     ok(@stat == 4 && $stat[0] eq "call" && !defined $stat[1] && $stat[2] == 0 && $stat[2] eq "ok" && $stat[3]{count} == 10, "check stat callback");
     close_all_servers();
+    MR::IProto::XS::Stat->set_callback(undef);
     return;
 }
 
@@ -874,7 +887,7 @@ sub check_singleton {
 
 sub check_async {
     SKIP: {
-        skip "cannot check async when internal loop is used", 1 unless $default_loop;
+        skip "cannot check async when internal loop is used", 1 unless $ev || $coro;
         my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L*' } };
         my $port = fork_test_server(sub {
             my ($socket) = @_;

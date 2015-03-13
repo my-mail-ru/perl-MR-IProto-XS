@@ -5,14 +5,28 @@
 #include "ppport.h"
 
 #include <EVAPI.h>
+#include <CoroAPI.h>
 
 #include <iprotocluster.h>
 #include <iproto_evapi.h>
 #include "iprotoxs.h"
 
-/* compatibility with libev 4.15 and newer */
-static void xev_run(struct ev_loop *loop, int flags) {
-    ev_run(loop, flags);
+static void xcoro_iproto_run(struct ev_loop *loop, void **data) {
+    *data = SvREFCNT_inc(CORO_CURRENT);
+    CORO_SCHEDULE;
+}
+
+static void xcoro_iproto_ready(struct ev_loop *loop, void *data) {
+    CORO_READY(data);
+    SvREFCNT_dec(data);
+}
+
+static void xev_iproto_run(struct ev_loop *loop, void **data) {
+    ev_run(loop, 0);
+}
+
+static void xev_iproto_ready(struct ev_loop *loop, void *data) {
+    ev_run(loop, EVBREAK_ONE);
 }
 
 static ev_io *xev_io_new(void (*cb)(struct ev_loop *, ev_io *, int)) {
@@ -71,7 +85,7 @@ typedef struct {
     SV *stat_callback;
     CV *unpack;
     SV *logfunc;
-    SV *loop;
+    const char *engine;
 } my_cxt_t;
 
 START_MY_CXT;
@@ -190,32 +204,15 @@ static bool iprotoxs_soft_retry_callback(iproto_message_t *message) {
     return result;
 }
 
-// Keep previous behaviour
-static SV *iprotoxs_internal_loop(void) {
-    dSP;
-    ENTER;
-    SAVETMPS;
-    PUSHMARK(SP);
-    mXPUSHp("EV::Loop", 8);
-    PUTBACK;
-    call_method("new", G_SCALAR);
-    SPAGAIN;
-    SV *loop = SvREFCNT_inc(POPs);
-    PUTBACK;
-    FREETMPS;
-    LEAVE;
-    return loop;
-}
-
-static void iprotoxs_set_evapi(SV *loop) {
+static void iprotoxs_set_evapi(bool coro) {
     iproto_evapi_t iproto_evapi = {
         .version = IPROTO_EVAPI_VERSION,
         .revision = IPROTO_EVAPI_REVISION,
-        .loop = (struct ev_loop *)SvIVX(SvRV(loop)),
+        .loop = EV_DEFAULT,
         .loop_fork = GEVAPI->loop_fork,
         .now_update = GEVAPI->now_update,
-        .run = xev_run,
-        .break_ = GEVAPI->break_,
+        .iproto_run = coro ? xcoro_iproto_run : xev_iproto_run,
+        .iproto_ready = coro ? xcoro_iproto_ready : xev_iproto_ready,
         .suspend = GEVAPI->suspend,
         .resume = GEVAPI->resume,
         .io_new = xev_io_new,
@@ -643,11 +640,19 @@ MODULE = MR::IProto::XS		PACKAGE = MR::IProto::XS		PREFIX = ixs_
 PROTOTYPES: ENABLE
 
 BOOT:
-    I_EV_API("MR::IProto::XS");
+    bool use_ev = perl_get_sv("EV::API", 0) != NULL;
+    bool use_coro = perl_get_sv("Coro::API", 0) != NULL;
+    if (use_coro) {
+        I_CORO_API("MR::IProto::XS");
+        load_module(0, sv_2mortal(newSVpvn("Coro::EV", 8)), NULL, NULL);
+        use_ev = true;
+    }
+    if (use_ev)
+        I_EV_API("MR::IProto::XS");
     iproto_initialize();
     iproto_set_logfunc(iprotoxs_logfunc_warn);
-    SV *loop = iprotoxs_internal_loop();
-    iprotoxs_set_evapi(loop);
+    if (use_coro || use_ev)
+        iprotoxs_set_evapi(use_coro);
     HV *stash = gv_stashpv("MR::IProto::XS", 1);
 #define IPROTOXS_CONST(s, ...) newCONSTSUB(stash, #s, newSVuv(s));
     IPROTO_ALL_ERROR_CODES(IPROTOXS_CONST);
@@ -657,7 +662,7 @@ BOOT:
     MY_CXT.singletons = newHV();
     MY_CXT.stat_callback = NULL;
     MY_CXT.unpack = newXS(NULL, iprotoxs_unpack_wrapper, __FILE__);
-    MY_CXT.loop = loop;
+    MY_CXT.engine = use_coro ? "coro" : use_ev ? "ev" : "internal";
 
 MR::IProto::XS
 ixs_new(klass, ...)
@@ -839,15 +844,13 @@ ixs_set_logfunc(klass, callback)
             iproto_set_logfunc(iprotoxs_logfunc_warn);
         }
 
-void
-ixs_set_ev_loop(klass, loop)
-        EV::Loop loop
+const char *
+ixs_engine(klass)
     CODE:
         dMY_CXT;
-        if (MY_CXT.loop)
-            SvREFCNT_dec(MY_CXT.loop);
-        MY_CXT.loop = SvREFCNT_inc(loop);
-        iprotoxs_set_evapi(loop);
+        RETVAL = MY_CXT.engine;
+    OUTPUT:
+        RETVAL
 
 MODULE = MR::IProto::XS		PACKAGE = MR::IProto::XS::Stat		PREFIX = ixs_stat_
 
