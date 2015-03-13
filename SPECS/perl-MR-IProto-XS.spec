@@ -1,6 +1,6 @@
 %bcond_without graphite
 
-%define __libiprotocluster_version 20141113.1839
+%define __libiprotocluster_version 20150313.2149
 
 Name:           perl-MR-IProto-XS
 Version:        %{__version}
