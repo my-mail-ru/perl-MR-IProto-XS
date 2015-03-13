@@ -12,6 +12,7 @@ Group:          MAILRU
 
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-buildroot
 BuildRequires:  perl(ExtUtils::MakeMaker), perl(Test::More)
+BuildRequires:  perl(EV), perl(Coro)
 BuildRequires:  libiprotocluster-devel >= %{__libiprotocluster_version}
 BuildRequires:  libiprotocluster >= %{__libiprotocluster_version}
 Requires:       perl(:MODULE_COMPAT_%(eval "`%{__perl} -V:version`"; echo $version))
