@@ -644,7 +644,7 @@ BOOT:
     bool use_coro = perl_get_sv("Coro::API", 0) != NULL;
     if (use_coro) {
         I_CORO_API("MR::IProto::XS");
-        load_module(0, sv_2mortal(newSVpvn("Coro::EV", 8)), NULL, NULL);
+        load_module(0, newSVpvn("Coro::EV", 8), NULL, NULL);
         use_ev = true;
     }
     if (use_ev)
@@ -845,9 +845,29 @@ ixs_set_logfunc(klass, callback)
         }
 
 const char *
-ixs_engine(klass)
+ixs_engine(klass, ...)
     CODE:
         dMY_CXT;
+        if (items > 1 && SvOK(ST(1))) {
+            char *name = SvPV_nolen(ST(1));
+            if (strcmp(name, "internal") == 0) {
+                iproto_set_evapi(NULL);
+                MY_CXT.engine = "internal";
+            } else if (strcmp(name, "ev") == 0) {
+                load_module(0, newSVpvn("EV", 2), NULL, NULL);
+                I_EV_API("MR::IProto::XS");
+                iprotoxs_set_evapi(false);
+                MY_CXT.engine = "ev";
+            } else if (strcmp(name, "coro") == 0) {
+                load_module(0, newSVpvn("Coro::EV", 8), NULL, NULL);
+                I_EV_API("MR::IProto::XS");
+                I_CORO_API("MR::IProto::XS");
+                iprotoxs_set_evapi(true);
+                MY_CXT.engine = "coro";
+            } else {
+                croak("Invalid engine name: %s", name);
+            }
+        }
         RETVAL = MY_CXT.engine;
     OUTPUT:
         RETVAL
