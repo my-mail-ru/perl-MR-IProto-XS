@@ -86,6 +86,7 @@ typedef struct {
     CV *unpack;
     SV *logfunc;
     const char *engine;
+    struct ev_loop *loop;
 } my_cxt_t;
 
 START_MY_CXT;
@@ -204,11 +205,31 @@ static bool iprotoxs_soft_retry_callback(iproto_message_t *message) {
     return result;
 }
 
-static void iprotoxs_set_evapi(bool coro) {
+static void iprotoxs_set_engine(const char *engine) {
+    dMY_CXT;
+    bool coro = false;
+    struct ev_loop *loop;
+    MY_CXT.engine = engine;
+    if (strcmp(engine, "internal") == 0) {
+        if (MY_CXT.loop == NULL)
+            MY_CXT.loop = ev_loop_new(0);
+        loop = MY_CXT.loop;
+    } else {
+        if (MY_CXT.loop != NULL)
+            ev_loop_destroy(MY_CXT.loop);
+        loop = EV_DEFAULT;
+        if (strcmp(engine, "coro") == 0) {
+            coro = true;
+            load_module(0, newSVpvn("Coro::EV", 8), NULL, NULL);
+            I_CORO_API("MR::IProto::XS");
+        } else if (strcmp(engine, "ev") != 0) {
+            croak("Invalid engine name: %s", engine);
+        }
+    }
     iproto_evapi_t iproto_evapi = {
         .version = IPROTO_EVAPI_VERSION,
         .revision = IPROTO_EVAPI_REVISION,
-        .loop = EV_DEFAULT,
+        .loop = loop,
         .loop_fork = GEVAPI->loop_fork,
         .now_update = GEVAPI->now_update,
         .iproto_run = coro ? xcoro_iproto_run : xev_iproto_run,
@@ -640,29 +661,28 @@ MODULE = MR::IProto::XS		PACKAGE = MR::IProto::XS		PREFIX = ixs_
 PROTOTYPES: ENABLE
 
 BOOT:
-    bool use_ev = perl_get_sv("EV::API", 0) != NULL;
-    bool use_coro = perl_get_sv("Coro::API", 0) != NULL;
-    if (use_coro) {
-        I_CORO_API("MR::IProto::XS");
-        load_module(0, newSVpvn("Coro::EV", 8), NULL, NULL);
-        use_ev = true;
+    MY_CXT_INIT;
+    MY_CXT.singletons = newHV();
+    MY_CXT.stat_callback = NULL;
+    MY_CXT.unpack = newXS(NULL, iprotoxs_unpack_wrapper, __FILE__);
+    const char *engine = "internal";
+    if (perl_get_sv("EV::API", 0) != NULL) {
+        engine = "ev";
+    } else {
+        load_module(0, newSVpvn("EV", 2), NULL, NULL);
     }
-    if (use_ev)
-        I_EV_API("MR::IProto::XS");
+    I_EV_API("MR::IProto::XS");
+    if (perl_get_sv("Coro::API", 0) != NULL) {
+        engine = "coro";
+    }
+    iprotoxs_set_engine(engine);
     iproto_initialize();
     iproto_set_logfunc(iprotoxs_logfunc_warn);
-    if (use_coro || use_ev)
-        iprotoxs_set_evapi(use_coro);
     HV *stash = gv_stashpv("MR::IProto::XS", 1);
 #define IPROTOXS_CONST(s, ...) newCONSTSUB(stash, #s, newSVuv(s));
     IPROTO_ALL_ERROR_CODES(IPROTOXS_CONST);
     IPROTO_LOGMASK(IPROTOXS_CONST);
 #undef IPROTOXS_CONST
-    MY_CXT_INIT;
-    MY_CXT.singletons = newHV();
-    MY_CXT.stat_callback = NULL;
-    MY_CXT.unpack = newXS(NULL, iprotoxs_unpack_wrapper, __FILE__);
-    MY_CXT.engine = use_coro ? "coro" : use_ev ? "ev" : "internal";
 
 MR::IProto::XS
 ixs_new(klass, ...)
@@ -849,24 +869,7 @@ ixs_engine(klass, ...)
     CODE:
         dMY_CXT;
         if (items > 1 && SvOK(ST(1))) {
-            char *name = SvPV_nolen(ST(1));
-            if (strcmp(name, "internal") == 0) {
-                iproto_set_evapi(NULL);
-                MY_CXT.engine = "internal";
-            } else if (strcmp(name, "ev") == 0) {
-                load_module(0, newSVpvn("EV", 2), NULL, NULL);
-                I_EV_API("MR::IProto::XS");
-                iprotoxs_set_evapi(false);
-                MY_CXT.engine = "ev";
-            } else if (strcmp(name, "coro") == 0) {
-                load_module(0, newSVpvn("Coro::EV", 8), NULL, NULL);
-                I_EV_API("MR::IProto::XS");
-                I_CORO_API("MR::IProto::XS");
-                iprotoxs_set_evapi(true);
-                MY_CXT.engine = "coro";
-            } else {
-                croak("Invalid engine name: %s", name);
-            }
+            iprotoxs_set_engine(SvPV_nolen(ST(1)));
         }
         RETVAL = MY_CXT.engine;
     OUTPUT:
