@@ -26,7 +26,7 @@ static void xev_iproto_run(struct ev_loop *loop, void **data) {
 }
 
 static void xev_iproto_ready(struct ev_loop *loop, void *data) {
-    ev_run(loop, EVBREAK_ONE);
+    ev_break(loop, EVBREAK_ONE);
 }
 
 static ev_io *xev_io_new(void (*cb)(struct ev_loop *, ev_io *, int)) {
