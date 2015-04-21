@@ -23,7 +23,7 @@ static void xcoro_iproto_run(struct ev_loop *loop, void **data) {
     *data = &state;
     while (!state.ready)
         CORO_SCHEDULE;
-    SvREFCNT_dec(state->coro);
+    SvREFCNT_dec(state.coro);
 }
 
 static void xcoro_iproto_ready(struct ev_loop *loop, void *data) {
