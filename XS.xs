@@ -11,14 +11,25 @@
 #include <iproto_evapi.h>
 #include "iprotoxs.h"
 
+typedef struct {
+    SV *coro;
+    bool ready;
+} xcoro_state_t;
+
 static void xcoro_iproto_run(struct ev_loop *loop, void **data) {
-    *data = SvREFCNT_inc(CORO_CURRENT);
-    CORO_SCHEDULE;
+    xcoro_state_t state;
+    state.coro = SvREFCNT_inc(CORO_CURRENT);
+    state.ready = false;
+    *data = &state;
+    while (!state.ready)
+        CORO_SCHEDULE;
+    SvREFCNT_dec(state->coro);
 }
 
 static void xcoro_iproto_ready(struct ev_loop *loop, void *data) {
-    CORO_READY(data);
-    SvREFCNT_dec(data);
+    xcoro_state_t *state = (xcoro_state_t *)data;
+    state->ready = true;
+    CORO_READY(state->coro);
 }
 
 static void xev_iproto_run(struct ev_loop *loop, void **data) {
