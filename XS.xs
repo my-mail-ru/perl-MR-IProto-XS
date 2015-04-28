@@ -17,6 +17,8 @@ typedef struct {
 } xcoro_state_t;
 
 static void xcoro_iproto_run(struct ev_loop *loop, void **data) {
+    if (CORO_CURRENT == SvRV(get_sv("Coro::idle", FALSE)))
+        croak("MR::IProto::XS FATAL: $Coro::idle blocked itself - did you try to block inside an event loop callback? Caught");
     xcoro_state_t state;
     state.coro = SvREFCNT_inc(CORO_CURRENT);
     state.ready = false;
