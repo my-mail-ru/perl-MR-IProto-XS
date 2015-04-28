@@ -11,29 +11,6 @@
 #include <iproto_evapi.h>
 #include "iprotoxs.h"
 
-typedef struct {
-    SV *coro;
-    bool ready;
-} xcoro_state_t;
-
-static void xcoro_iproto_run(struct ev_loop *loop, void **data) {
-    if (CORO_CURRENT == SvRV(get_sv("Coro::idle", FALSE)))
-        croak("MR::IProto::XS FATAL: $Coro::idle blocked itself - did you try to block inside an event loop callback? Caught");
-    xcoro_state_t state;
-    state.coro = SvREFCNT_inc(CORO_CURRENT);
-    state.ready = false;
-    *data = &state;
-    while (!state.ready)
-        CORO_SCHEDULE;
-    SvREFCNT_dec(state.coro);
-}
-
-static void xcoro_iproto_ready(struct ev_loop *loop, void *data) {
-    xcoro_state_t *state = (xcoro_state_t *)data;
-    state->ready = true;
-    CORO_READY(state->coro);
-}
-
 static void xev_iproto_run(struct ev_loop *loop, void **data) {
     ev_run(loop, 0);
 }
@@ -99,10 +76,46 @@ typedef struct {
     CV *unpack;
     SV *logfunc;
     const char *engine;
-    struct ev_loop *loop;
+    struct {
+        struct ev_loop *loop;
+    } internal;
+    struct {
+        SV *loop_coro;
+        ev_prepare prepare;
+    } coro;
 } my_cxt_t;
 
 START_MY_CXT;
+
+typedef struct {
+    SV *coro;
+    bool ready;
+} xcoro_state_t;
+
+static void xcoro_iproto_run(struct ev_loop *loop, void **data) {
+    dMY_CXT;
+    if (CORO_CURRENT == MY_CXT.coro.loop_coro) {
+        croak("MR::IProto::XS FATAL: did you try to block inside an event loop callback? Caught");
+    }
+    xcoro_state_t state;
+    state.coro = SvREFCNT_inc(CORO_CURRENT);
+    state.ready = false;
+    *data = &state;
+    while (!state.ready)
+        CORO_SCHEDULE;
+    SvREFCNT_dec(state.coro);
+}
+
+static void xcoro_iproto_ready(struct ev_loop *loop, void *data) {
+    xcoro_state_t *state = (xcoro_state_t *)data;
+    state->ready = true;
+    CORO_READY(state->coro);
+}
+
+static void xcoro_prepare_cb(EV_P_ ev_prepare *w, int revents) {
+    dMY_CXT;
+    MY_CXT.coro.loop_coro = CORO_CURRENT;
+}
 
 typedef SV * MR__IProto__XS;
 typedef SV * EV__Loop;
@@ -222,19 +235,27 @@ static void iprotoxs_set_engine(const char *engine) {
     dMY_CXT;
     bool coro = false;
     struct ev_loop *loop;
+    if (strcmp(engine, MY_CXT.engine) == 0)
+        return;
+    if (strcmp(MY_CXT.engine, "internal") == 0) {
+        ev_loop_destroy(MY_CXT.internal.loop);
+        MY_CXT.internal.loop = NULL;
+    } else if (strcmp(MY_CXT.engine, "coro") == 0) {
+        ev_prepare_stop(EV_DEFAULT, &MY_CXT.coro.prepare);
+    }
     MY_CXT.engine = engine;
     if (strcmp(engine, "internal") == 0) {
-        if (MY_CXT.loop == NULL)
-            MY_CXT.loop = ev_loop_new(0);
-        loop = MY_CXT.loop;
+        MY_CXT.internal.loop = ev_loop_new(0);
+        loop = MY_CXT.internal.loop;
     } else {
-        if (MY_CXT.loop != NULL)
-            ev_loop_destroy(MY_CXT.loop);
         loop = EV_DEFAULT;
         if (strcmp(engine, "coro") == 0) {
             coro = true;
             load_module(0, newSVpvn("Coro::EV", 8), NULL, NULL);
             I_CORO_API("MR::IProto::XS");
+            ev_prepare_init(&MY_CXT.coro.prepare, xcoro_prepare_cb);
+            ev_set_priority(&MY_CXT.coro.prepare, EV_MAXPRI);
+            ev_prepare_start(loop, &MY_CXT.coro.prepare);
         } else if (strcmp(engine, "ev") != 0) {
             croak("Invalid engine name: %s", engine);
         }
@@ -678,6 +699,7 @@ BOOT:
     MY_CXT.singletons = newHV();
     MY_CXT.stat_callback = NULL;
     MY_CXT.unpack = newXS(NULL, iprotoxs_unpack_wrapper, __FILE__);
+    MY_CXT.engine = "uninitialized";
     const char *engine = "internal";
     if (perl_get_sv("EV::API", 0) != NULL) {
         engine = "ev";
