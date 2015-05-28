@@ -13,6 +13,8 @@ use IPC::SharedMem;
 
 use AnyEvent;
 
+BEGIN { use_ok('MR::IProto::XS') };
+
 my ($valgrind, $ev, $coro, $pinger, $time);
 BEGIN {
     GetOptions(
@@ -23,11 +25,9 @@ BEGIN {
         'time!'         => \$time,
     );
     if ($coro) {
-        require Coro;
-        import Coro;
+        import MR::IProto::XS 'coro';
     } elsif ($ev) {
-        require EV;
-        import EV;
+        import MR::IProto::XS 'ev';
     }
 }
 my (%newopts, %msgopts);
@@ -37,8 +37,6 @@ if ($valgrind) {
 }
 
 $SIG{CHLD} = 'IGNORE';
-
-BEGIN { use_ok('MR::IProto::XS') };
 
 Coro::async(sub { AnyEvent->condvar->recv() }) if $coro;
 

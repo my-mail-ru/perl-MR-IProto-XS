@@ -68,14 +68,31 @@ static void *xev_timer_data(ev_timer *timer) {
     return timer->data;
 }
 
+#ifdef ev_depth
+# undef ev_depth
+# define ev_depth(loop) GEVAPI->depth ((loop))
+#endif
+
+static void xevev_iproto_run(struct ev_loop *loop, void **data) {
+    if (ev_depth(loop) > 0)
+        croak("MR::IProto::XS FATAL: did you try to block inside an event loop callback? Caught");
+    ev_run(loop, 0);
+}
+
+static void xevev_iproto_ready(struct ev_loop *loop, void *data) {
+    ev_break(loop, EVBREAK_ONE);
+}
+
 #define MY_CXT_KEY "MR::IProto::XS::_guts" XS_VERSION
+
+typedef enum { ENGINE_UNINITIALIZED, ENGINE_INTERNAL, ENGINE_EV, ENGINE_CORO } iprotoxs_engine_t;
 
 typedef struct {
     HV *singletons;
     SV *stat_callback;
     CV *unpack;
     SV *logfunc;
-    const char *engine;
+    iprotoxs_engine_t engine;
     struct {
         struct ev_loop *loop;
     } internal;
@@ -231,43 +248,43 @@ static bool iprotoxs_soft_retry_callback(iproto_message_t *message) {
     return result;
 }
 
-static void iprotoxs_set_engine(const char *engine) {
+static void iprotoxs_set_engine(iprotoxs_engine_t engine) {
     dMY_CXT;
-    bool coro = false;
-    struct ev_loop *loop;
-    if (strcmp(engine, MY_CXT.engine) == 0)
+    if (engine == MY_CXT.engine)
         return;
-    if (strcmp(MY_CXT.engine, "internal") == 0) {
-        ev_loop_destroy(MY_CXT.internal.loop);
-        MY_CXT.internal.loop = NULL;
-    } else if (strcmp(MY_CXT.engine, "coro") == 0) {
-        ev_prepare_stop(EV_DEFAULT, &MY_CXT.coro.prepare);
+    switch (MY_CXT.engine) {
+        case ENGINE_INTERNAL:
+            ev_loop_destroy(MY_CXT.internal.loop);
+            break;
+        case ENGINE_CORO:
+            ev_prepare_stop(EV_DEFAULT, &MY_CXT.coro.prepare);
+            break;
+        default:
+            break;
     }
-    MY_CXT.engine = engine;
-    if (strcmp(engine, "internal") == 0) {
-        MY_CXT.internal.loop = ev_loop_new(0);
-        loop = MY_CXT.internal.loop;
-    } else {
-        loop = EV_DEFAULT;
-        if (strcmp(engine, "coro") == 0) {
-            coro = true;
+    switch (engine) {
+        case ENGINE_INTERNAL:
+            MY_CXT.internal.loop = ev_loop_new(0);
+            break;
+        case ENGINE_CORO:
             load_module(0, newSVpvn("Coro::EV", 8), NULL, NULL);
             I_CORO_API("MR::IProto::XS");
             ev_prepare_init(&MY_CXT.coro.prepare, xcoro_prepare_cb);
             ev_set_priority(&MY_CXT.coro.prepare, EV_MAXPRI);
-            ev_prepare_start(loop, &MY_CXT.coro.prepare);
-        } else if (strcmp(engine, "ev") != 0) {
-            croak("Invalid engine name: %s", engine);
-        }
+            ev_prepare_start(EV_DEFAULT, &MY_CXT.coro.prepare);
+            break;
+        default:
+            break;
     }
+    MY_CXT.engine = engine;
     iproto_evapi_t iproto_evapi = {
         .version = IPROTO_EVAPI_VERSION,
         .revision = IPROTO_EVAPI_REVISION,
-        .loop = loop,
+        .loop = engine == ENGINE_INTERNAL ? MY_CXT.internal.loop : EV_DEFAULT,
         .loop_fork = GEVAPI->loop_fork,
         .now_update = GEVAPI->now_update,
-        .iproto_run = coro ? xcoro_iproto_run : xev_iproto_run,
-        .iproto_ready = coro ? xcoro_iproto_ready : xev_iproto_ready,
+        .iproto_run = engine == ENGINE_CORO ? xcoro_iproto_run : engine == ENGINE_INTERNAL ? xev_iproto_run : xevev_iproto_run,
+        .iproto_ready = engine == ENGINE_CORO ? xcoro_iproto_ready : engine == ENGINE_INTERNAL ? xev_iproto_ready : xevev_iproto_ready,
         .suspend = GEVAPI->suspend,
         .resume = GEVAPI->resume,
         .io_new = xev_io_new,
@@ -288,6 +305,20 @@ static void iprotoxs_set_engine(const char *engine) {
         .timer_again = GEVAPI->timer_again
     };
     iproto_set_evapi(&iproto_evapi);
+}
+
+static void iprotoxs_set_engine_string(const char *name) {
+    iprotoxs_engine_t engine;
+    if (strcmp(name, "internal") == 0) {
+        engine = ENGINE_INTERNAL;
+    } else if (strcmp(name, "ev") == 0) {
+        engine = ENGINE_EV;
+    } else if (strcmp(name, "coro") == 0) {
+        engine = ENGINE_CORO;
+    } else {
+        croak("Invalid engine name: %s", name);
+    }
+    iprotoxs_set_engine(engine);
 }
 
 static void iprotoxs_servers_set(iproto_shard_t *shard, bool is_replica, AV *config) {
@@ -699,18 +730,10 @@ BOOT:
     MY_CXT.singletons = newHV();
     MY_CXT.stat_callback = NULL;
     MY_CXT.unpack = newXS(NULL, iprotoxs_unpack_wrapper, __FILE__);
-    MY_CXT.engine = "uninitialized";
-    const char *engine = "internal";
-    if (perl_get_sv("EV::API", 0) != NULL) {
-        engine = "ev";
-    } else {
-        load_module(0, newSVpvn("EV", 2), NULL, NULL);
-    }
+    MY_CXT.engine = ENGINE_UNINITIALIZED;
+    load_module(0, newSVpvn("EV", 2), NULL, NULL);
     I_EV_API("MR::IProto::XS");
-    if (perl_get_sv("Coro::API", 0) != NULL) {
-        engine = "coro";
-    }
-    iprotoxs_set_engine(engine);
+    iprotoxs_set_engine(ENGINE_INTERNAL);
     iproto_initialize();
     iproto_set_logfunc(iprotoxs_logfunc_warn);
     HV *stash = gv_stashpv("MR::IProto::XS", 1);
@@ -718,6 +741,13 @@ BOOT:
     IPROTO_ALL_ERROR_CODES(IPROTOXS_CONST);
     IPROTO_LOGMASK(IPROTOXS_CONST);
 #undef IPROTOXS_CONST
+
+void
+ixs_import(klass, ...)
+    CODE:
+        if (items > 1 && SvOK(ST(1))) {
+            iprotoxs_set_engine_string(SvPV_nolen(ST(1)));
+        }
 
 MR::IProto::XS
 ixs_new(klass, ...)
@@ -904,9 +934,9 @@ ixs_engine(klass, ...)
     CODE:
         dMY_CXT;
         if (items > 1 && SvOK(ST(1))) {
-            iprotoxs_set_engine(SvPV_nolen(ST(1)));
+            iprotoxs_set_engine_string(SvPV_nolen(ST(1)));
         }
-        RETVAL = MY_CXT.engine;
+        RETVAL = MY_CXT.engine == ENGINE_CORO ? "coro" : MY_CXT.engine == ENGINE_EV ? "ev" : "internal";
     OUTPUT:
         RETVAL
 
