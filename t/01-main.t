@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 88;
+use Test::More tests => 89;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use IO::Socket;
@@ -287,6 +287,11 @@ sub check_errors {
         my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ { error => 'ok', data => pack('L', 0x01020304) }, map {{ error => 'protocol error' }} (1, 2) ], "invalid sync");
+    }
+    {
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["x1x2x3x4.my.mail.ru:$EMPTY_PORT"]);
+        my $resp = $iproto->bulk([$msg, $msg, $msg]);
+        is_deeply($resp, [ map {{ error => "host unknown" }} (1 .. 3) ], "host unknown");
     }
 
     close_all_servers();
