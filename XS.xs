@@ -68,6 +68,10 @@ static void *xev_timer_data(ev_timer *timer) {
     return timer->data;
 }
 
+static void xev_timer_set_priority(ev_timer *timer, int priority) {
+    ev_set_priority(timer, priority);
+}
+
 #ifdef ev_depth
 # undef ev_depth
 # define ev_depth(loop) GEVAPI->depth ((loop))
@@ -302,7 +306,8 @@ static void iprotoxs_set_engine(iprotoxs_engine_t engine) {
         .timer_data = xev_timer_data,
         .timer_start = GEVAPI->timer_start,
         .timer_stop = GEVAPI->timer_stop,
-        .timer_again = GEVAPI->timer_again
+        .timer_again = GEVAPI->timer_again,
+        .timer_set_priority = xev_timer_set_priority
     };
     iproto_set_evapi(&iproto_evapi);
 }

@@ -289,7 +289,7 @@ sub check_errors {
         is_deeply($resp, [ { error => 'ok', data => pack('L', 0x01020304) }, map {{ error => 'protocol error' }} (1, 2) ], "invalid sync");
     }
     {
-        my $iproto = MR::IProto::XS->new(%newopts, masters => ["x1x2x3x4.my.mail.ru:$EMPTY_PORT"]);
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["x1x2x3x4.my.mail.ru.:$EMPTY_PORT"]);
         my $resp = $iproto->bulk([$msg, $msg, $msg]);
         is_deeply($resp, [ map {{ error => "host unknown" }} (1 .. 3) ], "host unknown");
     }
