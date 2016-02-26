@@ -142,13 +142,17 @@ typedef SV * MR__IProto__XS;
 typedef SV * EV__Loop;
 
 typedef struct {
+    MR__IProto__XS iprotoxs;
+    SV *request;
+    iproto_message_t *message;
+    SV *error;
     SV *callback;
     SV *soft_retry_callback;
-    HV *request;
     SV *data;
 } iprotoxs_data_t;
 
-HV *iprotoxs_message_to_hv(iproto_message_t *message, HV *request);
+static SV *iprotoxs_context_response(iprotoxs_data_t *context);
+static void iprotoxs_context_free(iprotoxs_data_t *context);
 
 static void iprotoxs_logfunc_warn(iproto_logmask_t mask, const char *str) {
     char *level;
@@ -210,22 +214,22 @@ static void iprotoxs_stat_callback(const char *type, const char *server, uint32_
 }
 
 static void iprotoxs_callback(iproto_message_t *message) {
-    iprotoxs_data_t *data = (iprotoxs_data_t *)iproto_message_options(message)->data;
-    SV *callback = SvREFCNT_inc(data->callback);
+    iprotoxs_data_t *context = (iprotoxs_data_t *)iproto_message_options(message)->data;
+    assert(context->message == message);
     dSP;
     ENTER;
     SAVETMPS;
     PUSHMARK(SP);
-    mXPUSHs(newRV_noinc((SV *)iprotoxs_message_to_hv(message, data->request)));
+    mXPUSHs(iprotoxs_context_response(context));
     PUTBACK;
-    call_sv(callback, G_EVAL|G_DISCARD);
+    call_sv(context->callback, G_EVAL|G_DISCARD);
     SPAGAIN;
     if (SvTRUE(ERRSV)) {
         warn("MR::IProto::XS: died in callback: %s", SvPV_nolen(ERRSV));
     }
     FREETMPS;
     LEAVE;
-    SvREFCNT_dec(callback);
+    iprotoxs_context_free(context);
 }
 
 static bool iprotoxs_soft_retry_callback(iproto_message_t *message) {
@@ -450,19 +454,19 @@ static SV *iprotoxs_pack_data(HV *opts) {
     AV *data = (AV *)SvRV(*sv);
     SV **list = av_fetch(data, 0, 0);
     size_t listlen = av_len(data) + 1;
-    SV *cat = sv_2mortal(newSVpv("", 0));
+    SV *cat = newSVpv("", 0);
     SvUTF8_off(cat);
     packlist(cat, format, format + formatlen, list, list + listlen);
     return cat;
 }
 
-AV *iprotoxs_unpack_data(HV *opts, char *data, STRLEN length, SV *errsv) {
+static AV *iprotoxs_unpack_data(HV *opts, SV *data, SV *errsv) {
     SV **sv = hv_fetch(opts, "format", 6, 0);
     if (!(sv && SvPOK(*sv)))
         croak("\"format\" should be a SCALAR if method \"unpack\" is used");
     /* We should use G_EVAL, so can't use unpackstring() function directly */
     SV *format = *sv;
-    if (data == NULL && SvCUR(format) != 0) {
+    if (SvCUR(data) == 0 && SvCUR(format) != 0) {
         sv_setuv(errsv, ERR_CODE_PROTO_ERR);
         sv_setpvf(errsv, "Response data is empty, should be '%s'", SvPV_nolen(format));
         SvIOK_on(errsv);
@@ -474,7 +478,7 @@ AV *iprotoxs_unpack_data(HV *opts, char *data, STRLEN length, SV *errsv) {
     SAVETMPS;
     PUSHMARK(SP);
     XPUSHs(format);
-    XPUSHs(sv_2mortal(newSVpvn(data, length)));
+    XPUSHs(data);
     PUTBACK;
     I32 cnt = call_sv((SV *)MY_CXT.unpack, G_ARRAY | G_EVAL);
     SPAGAIN;
@@ -495,6 +499,36 @@ AV *iprotoxs_unpack_data(HV *opts, char *data, STRLEN length, SV *errsv) {
         SvIOK_on(errsv);
     } else {
         result = av_make(cnt, SP - cnt + 1);
+    }
+    FREETMPS;
+    LEAVE;
+    return result;
+}
+
+static SV *iprotoxs_call_coder(HV *opts, SV *data, SV *errsv) {
+    SV **sv = hv_fetch(opts, "sub", 3, 0);
+    if (!(sv && (SvPOK(*sv) || (SvROK(*sv) && SvTYPE(SvRV(*sv)) == SVt_PVCV))))
+        croak("\"sub\" should be a CODEREF or subroutine name if method \"sub\" is used");
+    SV *subsv = *sv;
+    SV *result;
+    dSP;
+    ENTER;
+    SAVETMPS;
+    PUSHMARK(SP);
+    XPUSHs(data);
+    PUTBACK;
+    call_sv(subsv, G_SCALAR | G_EVAL);
+    SPAGAIN;
+    if (SvTRUE(ERRSV)) {
+        result = NULL;
+        (void)POPs;
+        STRLEN len;
+        sv_setuv(errsv, ERR_CODE_PROTO_ERR);
+        char *errstr = SvPV(ERRSV, len);
+        sv_setpvn(errsv, errstr, len);
+        SvIOK_on(errsv);
+    } else {
+        result = SvREFCNT_inc(POPs);
     }
     FREETMPS;
     LEAVE;
@@ -593,137 +627,225 @@ void iprotoxs_parse_opts(iproto_message_opts_t *opts, HV *request) {
     }
 }
 
-iproto_message_t *iprotoxs_hv_to_message(HV *request) {
-    SV **val;
-
-    val = hv_fetch(request, "iproto", 6, 0);
-    if (!val) croak("\"iproto\" should be specified");
-    iproto_cluster_t *cluster = iprotoxs_extract_cluster(*val);
-    if (!cluster) croak("\"iproto\" should be an instance or a singleton of type MR::IProto::XS");
-
-    val = hv_fetch(request, "code", 4, 0);
-    if (!val) croak("\"code\" should be specified");
-    if (!(SvIOK(*val) || looks_like_number(*val)))
-        croak("Invalid \"code\" value");
-    uint32_t code = SvUV(*val);
-
-    void *data;
-    size_t size;
-    SV *datasv = NULL;
-    val = hv_fetch(request, "request", 7, 0);
-    if (!val) croak("\"request\" should be specified");
-    if (SvPOK(*val)) {
-        data = SvPV(*val, size);
-    } else if (SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVHV) {
-        HV *hv = (HV *)SvRV(*val);
-        SV **sv = hv_fetch(hv, "method", 6, 0);
-        if (!sv) croak("\"method\" should be specified in \"data\" hash");
-        if (!SvPOK(*sv)) croak("\"method\" should be a SCALAR");
-        char *method = SvPV_nolen(*sv);
+static SV *iprotoxs_request_data(SV *options, SV *errsv) {
+    if (SvPOK(options)) {
+        return SvREFCNT_inc(options);
+    } else if (SvROK(options) && SvTYPE(SvRV(options)) == SVt_PVHV) {
+        HV *optshv = (HV *)SvRV(options);
+        SV **val = hv_fetch(optshv, "method", 6, 0);
+        if (!(val && SvPOK(*val)))
+            croak("\"method\" in \"request\" should be a string");
+        char *method = SvPV_nolen(*val);
         if (strcmp(method, "pack") == 0) {
-            datasv = iprotoxs_pack_data(hv);
-            data = SvPV(datasv, size);
+            return iprotoxs_pack_data(optshv);
+        } else if (strcmp(method, "sub") == 0) {
+            val = hv_fetch(optshv, "data", 4, 0);
+            if (!val)
+                croak("\"data\" should exist if method \"sub\" is used");
+            return iprotoxs_call_coder(optshv, *val, errsv);
         } else {
             croak("invalid \"method\" value");
         }
     } else {
         croak("invalid \"request\" value");
     }
+}
 
+static iproto_message_t *iprotoxs_message_init(iprotoxs_data_t *context) {
+    HV *reqhv = (HV *)SvRV(context->request);
+
+    SV **val = hv_fetch(reqhv, "code", 4, 0);
+    if (!val) croak("\"code\" should be specified");
+    if (!(SvIOK(*val) || looks_like_number(*val)))
+        croak("Invalid \"code\" value");
+    uint32_t code = SvUV(*val);
+
+    val = hv_fetch(reqhv, "request", 7, 0);
+    if (!val)
+        croak("\"request\" should be specified");
+    SV *datasv = iprotoxs_request_data(*val, context->error);
+    if (!datasv)
+        return NULL;
+
+    context->data = datasv;
+
+    size_t size;
+    void *data = SvPV(datasv, size);
     iproto_message_t *message = iproto_message_init(code, data, size);
+
+    iproto_cluster_t *cluster = iprotoxs_extract_cluster(context->iprotoxs);
+    if (!cluster)
+        croak("\"iproto\" should be an instance or a singleton of type MR::IProto::XS");
     iproto_message_set_cluster(message, cluster);
+
     iproto_message_opts_t *opts = iproto_message_options(message);
-    iprotoxs_parse_opts(opts, request);
+    opts->data = context;
+    iprotoxs_parse_opts(opts, reqhv);
 
-    iprotoxs_data_t *optsdata;
-    Newxz(optsdata, 1, iprotoxs_data_t);
-
-    if ((val = hv_fetch(request, "callback", 8, 0))) {
+    if ((val = hv_fetch(reqhv, "callback", 8, 0))) {
         if (!(SvROK(*val) || SvTYPE(SvRV(*val)) == SVt_PVCV))
             croak("\"callback\" should be a CODEREF");
         opts->callback = iprotoxs_callback;
-        optsdata->request = (HV *)SvREFCNT_inc((SV *)request);
-        optsdata->callback = SvREFCNT_inc(*val);
+        context->callback = SvREFCNT_inc(*val);
     }
 
-    if ((val = hv_fetch(request, "soft_retry_callback", 19, 0))) {
+    if ((val = hv_fetch(reqhv, "soft_retry_callback", 19, 0))) {
         if (!(SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVCV))
             croak("\"soft_retry_callback\" should be a CODEREF");
         opts->soft_retry_callback = iprotoxs_soft_retry_callback;
-        optsdata->soft_retry_callback = SvREFCNT_inc(*val);
+        context->soft_retry_callback = SvREFCNT_inc(*val);
     }
-
-    if (datasv)
-        optsdata->data = SvREFCNT_inc(datasv);
-
-    opts->data = optsdata;
 
     return message;
 }
 
-HV *iprotoxs_message_to_hv(iproto_message_t *message, HV *request) {
-    iproto_error_t error = iproto_message_error(message);
-    SV *errsv = newSVuv(error);
-    sv_setpv(errsv, iproto_error_string(error));
-    SvIOK_on(errsv);
-    SV **val = hv_fetch(request, "inplace", 7, 0);
-    bool inplace = val && SvTRUE(*val);
-    HV *result = newHV();
-    if (error == ERR_CODE_OK) {
-        bool replica;
-        size_t size;
-        void *data = iproto_message_response(message, &size, &replica);
-        if (replica)
-            (void)hv_store(result, "replica", 7, &PL_sv_yes, 0);
+static SV *iprotoxs_message_response(iproto_message_t *message, HV *options, bool *replica, SV *errsv) {
+    size_t size;
+    void *data = iproto_message_response(message, &size, replica);
+    SV *datasv = newSVpvn(data, size);
+    if (!options)
+        return datasv;
 
-        SV *datasv;
-        SV **val;
-        if ((val = hv_fetch(request, "response", 8, 0))) {
-            if (!(SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVHV)) croak("invalid \"response\" value");
-            HV *hv = (HV *)SvRV(*val);
-            SV **sv = hv_fetch(hv, "method", 6, 0);
-            if (!sv) croak("\"method\" should be specified in \"response\" hash");
-            if (!SvPOK(*sv)) croak("\"method\" should be SCALAR");
-            char *method = SvPV_nolen(*sv);
-            if (strcmp(method, "unpack") == 0) {
-                AV *dataav = iprotoxs_unpack_data(hv, data, size, errsv);
-                datasv = dataav ? newRV_noinc((SV *)dataav) : NULL;
-            } else {
-                croak("invalid \"method\" value");
+    SV **val = hv_fetch(options, "errcode", 7, 0);
+    if (val) {
+        if (!SvIOK(*val))
+            croak("\"errcode\" should be a number");
+        UV errcode;
+        size_t bytes = SvUV(*val);
+        if (size < bytes) {
+            sv_setuv(errsv, ERR_CODE_PROTO_ERR);
+            sv_setpvf(errsv, "Response is too short (%zd bytes when %zd is required)", bytes, size);
+            SvIOK_on(errsv);
+            return NULL;
+        }
+        switch (bytes) {
+            case 1:
+                errcode = *(uint8_t*)data;
+                break;
+            case 2:
+                errcode = *(uint16_t*)data;
+                break;
+            case 4:
+                errcode = *(uint32_t*)data;
+                break;
+            case 8:
+                errcode = *(uint64_t*)data;
+                break;
+            default:
+                croak("\"errcode\" should be 1, 2, 4 or 8");
+        }
+        sv_chop(datasv, SvPVX_const(datasv) + bytes);
+        if (errcode != ERR_CODE_OK) {
+            sv_setsv(errsv, sv_2mortal(datasv));
+            sv_setuv(errsv, errcode);
+            SvPOK_on(errsv);
+            return NULL;
+        }
+    }
+
+    val = hv_fetch(options, "method", 6, 0);
+    if (!(val && SvPOK(*val)))
+        croak("\"method\" in \"response\" should be a string");
+    char *method = SvPV_nolen(*val);
+    if (strcmp(method, "unpack") == 0) {
+        AV *dataav = iprotoxs_unpack_data(options, datasv, errsv);
+        SvREFCNT_dec(datasv);
+        return dataav ? newRV_noinc((SV *)dataav) : NULL;
+    } else if (strcmp(method, "sub") == 0) {
+        SV *resp = iprotoxs_call_coder(options, datasv, errsv);
+        SvREFCNT_dec(datasv);
+        return resp;
+    } else {
+        croak("invalid \"method\" value");
+    }
+}
+
+static iprotoxs_data_t *iprotoxs_context_init(MR__IProto__XS iprotoxs, SV *request) {
+    if (!(SvROK(request) && SvTYPE(SvRV(request)) == SVt_PVHV))
+        croak("Message should be a HASHREF");
+
+    iprotoxs_data_t *context;
+    Newxz(context, 1, iprotoxs_data_t);
+    context->request = SvREFCNT_inc(request);
+    context->error = newSV(0);
+
+    SV **val = hv_fetch((HV *)SvRV(request), "iproto", 6, 0);
+    SV *ixs = val ? *val : iprotoxs;
+    if (!ixs) croak("\"iproto\" should be specified");
+    context->iprotoxs = SvREFCNT_inc(ixs);
+
+    context->message = iprotoxs_message_init(context);
+
+    return context;
+}
+
+static void iprotoxs_context_free(iprotoxs_data_t *context) {
+    if (context->message)
+        iproto_message_free(context->message);
+    SvREFCNT_dec(context->iprotoxs);
+    SvREFCNT_dec(context->request);
+    if (context->data)
+        SvREFCNT_dec(context->data);
+    if (context->callback)
+        SvREFCNT_dec(context->callback);
+    if (context->soft_retry_callback)
+        SvREFCNT_dec(context->soft_retry_callback);
+    Safefree(context);
+}
+
+static SV *iprotoxs_context_response(iprotoxs_data_t *context) {
+    HV *reqhv = (HV *)SvRV(context->request);
+    SV **val = hv_fetch(reqhv, "inplace", 7, 0);
+    bool inplace = val && SvTRUE(*val);
+
+    SV *errsv = context->error;
+
+    HV *result = newHV();
+    if (context->message) {
+        iproto_error_t error = iproto_message_error(context->message);
+        sv_setuv(errsv, error);
+        sv_setpv(errsv, iproto_error_string(error));
+        SvIOK_on(errsv);
+        if (error == ERR_CODE_OK) {
+            HV *ropts = NULL;
+            if ((val = hv_fetch(reqhv, "response", 8, 0))) {
+                if (!(SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVHV))
+                    croak("invalid \"response\" value");
+                ropts = (HV *)SvRV(*val);
             }
-            if (inplace && datasv) {
-                if (hv_store(hv, "data", 4, datasv, 0))
-                    SvREFCNT_inc(datasv);
+
+            bool replica;
+            SV *datasv = iprotoxs_message_response(context->message, ropts, &replica, errsv);
+            if (replica) {
+                (void)hv_store(result, "replica", 7, &PL_sv_yes, 0);
+                if (inplace)
+                    (void)hv_store(reqhv, "replica", 7, &PL_sv_yes, 0);
             }
-        } else {
-            datasv = newSVpvn(data, size);
-            if (inplace) {
-                if (hv_store(request, "response", 8, datasv, 0))
-                    SvREFCNT_inc(datasv);
+            if (datasv) {
+                (void)hv_store(result, "data", 4, datasv, 0);
+                if (inplace) {
+                    if (ropts ? hv_store(ropts, "data", 4, datasv, 0) : hv_store(reqhv, "response", 8, datasv, 0))
+                        SvREFCNT_inc(datasv);
+                }
             }
         }
-        if (datasv)
-            (void)hv_store(result, "data", 4, datasv, 0);
     }
+
     (void)hv_store(result, "error", 5, errsv, 0);
     if (inplace) {
-        if (hv_store(request, "error", 5, errsv, 0))
+        if (hv_store(reqhv, "error", 5, errsv, 0))
             SvREFCNT_inc(errsv);
     }
 
-    iprotoxs_data_t *optsdata = (iprotoxs_data_t *)iproto_message_options(message)->data;
-    if (optsdata->callback) {
-        SvREFCNT_dec(optsdata->callback);
-        SvREFCNT_dec(optsdata->request);
-    }
-    if (optsdata->soft_retry_callback)
-        SvREFCNT_dec(optsdata->soft_retry_callback);
-    if (optsdata->data)
-        SvREFCNT_dec(optsdata->data);
-    Safefree(optsdata);
+    return newRV_noinc((SV *)result);
+}
 
-    iproto_message_free(message);
-    return result;
+static SV *iprotoxs_context_retval(iprotoxs_data_t *context) {
+    if (context->callback)
+        return &PL_sv_undef;
+    SV *retval = iprotoxs_context_response(context);
+    iprotoxs_context_free(context);
+    return retval;
 }
 
 MODULE = MR::IProto::XS		PACKAGE = MR::IProto::XS		PREFIX = ixs_
@@ -853,49 +975,40 @@ ixs_bulk(iprotoxs, list, ...)
         AV *list
     CODE:
         iprotoxs_call_timeout(timeout, 2);
-        int nmessages = av_len(list) + 1;
+        int nreqs = av_len(list) + 1;
+        iprotoxs_data_t **contexts;
+        Newx(contexts, nreqs, iprotoxs_data_t *);
         iproto_message_t **messages;
-        Newx(messages, nmessages, iproto_message_t *);
-        for (int i = 0; i < nmessages; i++) {
+        Newx(messages, nreqs, iproto_message_t *);
+        int nmessages = 0;
+        for (int i = 0; i < nreqs; i++) {
             SV **sv = av_fetch(list, i, 0);
-            if (!(sv && SvROK(*sv) && SvTYPE(SvRV(*sv)) == SVt_PVHV))
-                croak("Message should be a HASHREF");
-            HV *request = (HV *)SvRV(*sv);
-            if (iprotoxs && !hv_exists(request, "iproto", 6)) {
-                (void)hv_store(request, "iproto", 6, SvREFCNT_inc(iprotoxs), 0);
-                SAVEDELETE(request, savepvn("iproto", 6), 6);
-            }
-            messages[i] = iprotoxs_hv_to_message(request);
+            iprotoxs_data_t *context = iprotoxs_context_init(iprotoxs, *sv);
+            if (context->message)
+                messages[nmessages++] = context->message;
+            contexts[i] = context;
         }
-        iproto_bulk(messages, nmessages, timeout);
+        if (nmessages)
+            iproto_bulk(messages, nmessages, timeout);
         RETVAL = newAV();
-        for (int i = 0; i < nmessages; i++) {
-            SV **sv = av_fetch(list, i, 0);
-            iproto_message_opts_t *opts = iproto_message_options(messages[i]);
-            av_push(RETVAL, opts->callback ? &PL_sv_undef
-                : newRV_noinc((SV*)iprotoxs_message_to_hv(messages[i], (HV *)SvRV(*sv))));
-        }
+        for (int i = 0; i < nreqs; i++)
+            av_push(RETVAL, iprotoxs_context_retval(contexts[i]));
         sv_2mortal((SV*)RETVAL);
         Safefree(messages);
+        Safefree(contexts);
     OUTPUT:
         RETVAL
 
-HV *
+SV *
 ixs_do(iprotoxs, request, ...)
         MR::IProto::XS iprotoxs
-        HV *request
+        SV *request
     CODE:
         iprotoxs_call_timeout(timeout, 2);
-        if (iprotoxs && !hv_exists(request, "iproto", 6)) {
-            (void)hv_store(request, "iproto", 6, SvREFCNT_inc(iprotoxs), 0);
-            SAVEDELETE(request, savepvn("iproto", 6), 6);
-        }
-        iproto_message_t *message = iprotoxs_hv_to_message(request);
-        iproto_do(message, timeout);
-        iproto_message_opts_t *opts = iproto_message_options(message);
-        if (opts->callback)
-            XSRETURN_UNDEF;
-        RETVAL = (HV *)sv_2mortal((SV *)iprotoxs_message_to_hv(message, request));
+        iprotoxs_data_t *context = iprotoxs_context_init(iprotoxs, request);
+        if (context->message)
+            iproto_do(context->message, timeout);
+        RETVAL = iprotoxs_context_retval(context);
     OUTPUT:
         RETVAL
 

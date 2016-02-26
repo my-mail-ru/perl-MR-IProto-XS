@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 89;
+use Test::More tests => 96;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use IO::Socket;
@@ -60,6 +60,7 @@ check_const();
 check_new();
 check_errors();
 check_success();
+check_coders();
 check_early_retry();
 check_retry();
 check_soft_retry();
@@ -380,6 +381,97 @@ sub check_success {
         sleep 0.2;
         $resp = $iproto->bulk([ map $msg, (11 .. 13)]);
         is_deeply($resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 13) ], "closed by server 2");
+    }
+
+    close_all_servers();
+    return;
+}
+
+sub check_coders {
+    {
+        my $port = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, "1,2,3", "5,6,7");
+        });
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
+        my $resp = $iproto->do({
+            %msgopts,
+            code     => 17,
+            request  => { method => 'sub', sub => sub { join ',', @{$_[0]} }, data => [1, 2, 3] },
+            response => { method => 'sub', sub => sub { [ split /,/, $_[0] ] } },
+        });
+        is_deeply($resp, { error => "ok", data => [ 5, 6, 7 ] }, "do encode/decode using subroutine");
+    }
+
+    {
+        my $port = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, "1,2,3", "21,22,23");
+            check_and_reply($socket, 17, "7,8,9", "17,18,19");
+            check_and_reply($socket, 17, "10,11,12", "30,31,32");
+        });
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
+        my ($reqline, $resline);
+        my $resp = $iproto->bulk([
+            {
+                code     => 17,
+                request  => { method => 'sub', sub => sub { join ',', @{$_[0]} }, data => [1, 2, 3] },
+                response => { method => 'sub', sub => sub { [ split /,/, $_[0] ] } },
+            },
+            {
+                code     => 17,
+                request  => { method => 'sub', sub => sub { die "in request" }, data => [4, 5, 6] }, do { $reqline = __LINE__; () },
+                response => { method => 'sub', sub => sub { [ split /,/, $_[0] ] } },
+            },
+            {
+                code     => 17,
+                request  => { method => 'sub', sub => sub { join ',', @{$_[0]} }, data => [7, 8, 9] },
+                response => { method => 'sub', sub => sub { die "in response" } }, do { $resline = __LINE__; () },
+            },
+            {
+                code     => 17,
+                request  => { method => 'sub', sub => sub { join ',', @{$_[0]} }, data => [10, 11, 12] },
+                response => { method => 'sub', sub => sub { [ split /,/, $_[0] ] } },
+            },
+        ]);
+        is_deeply($resp, [
+            { error => "ok", data => [ 21, 22, 23 ] },
+            { error => "in request at ".__FILE__." line $reqline.\n" },
+            { error => "in response at ".__FILE__." line $resline.\n" },
+            { error => "ok", data => [ 30, 31, 32 ] },
+        ], "bulk encode/decode");
+        ok($resp->[1]->{error} == MR::IProto::XS::ERR_CODE_PROTO_ERR && $resp->[2]->{error} == MR::IProto::XS::ERR_CODE_PROTO_ERR, "encode/decode: valid numeric errors");
+    }
+
+    {
+        my $port = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, "1,2,3", "\0\0\0\0"."5,6,7");
+        });
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
+        my $resp = $iproto->do({
+            %msgopts,
+            code     => 17,
+            request  => { method => 'sub', sub => sub { join ',', @{$_[0]} }, data => [1, 2, 3] },
+            response => { method => 'sub', sub => sub { [ split /,/, $_[0] ] }, errcode => 4 },
+        });
+        is_deeply($resp, { error => "ok", data => [ 5, 6, 7 ] }, "decode errcode: success");
+    }
+
+    {
+        my $port = fork_test_server(sub {
+            my ($socket) = @_;
+            check_and_reply($socket, 17, "1,2,3", "\4\0\0\0"."something happened");
+        });
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
+        my $resp = $iproto->do({
+            %msgopts,
+            code     => 17,
+            request  => { method => 'sub', sub => sub { join ',', @{$_[0]} }, data => [1, 2, 3] },
+            response => { method => 'sub', sub => sub { [ split /,/, $_[0] ] }, errcode => 4 },
+        });
+        is_deeply($resp, { error => "something happened" }, "decode errcode: failure");
+        ok($resp->{error} == 4, "decode errocode: valid numeric error");
     }
 
     close_all_servers();
@@ -925,6 +1017,7 @@ sub check_leak {
         no_leaks_ok { check_new() } "constructor not leaks";
         no_leaks_ok { check_errors() } "error handling not leaks";
         no_leaks_ok { check_success() } "success query not leaks";
+        no_leaks_ok { check_coders() } "coders not leak";
         no_leaks_ok { check_early_retry() } "early retry not leaks";
         no_leaks_ok { check_retry() } "retry not leaks";
         no_leaks_ok { check_soft_retry() } "soft retry not leaks";
