@@ -734,7 +734,11 @@ static SV *iprotoxs_message_response(iproto_message_t *message, HV *options, boo
             default:
                 croak("\"errcode\" should be 1, 2, 4 or 8");
         }
+#if (PERL_BCDVERSION < 0x5010000)
+        sv_chop(datasv, SvPVX(datasv) + bytes);
+#else
         sv_chop(datasv, SvPVX_const(datasv) + bytes);
+#endif
         if (errcode != ERR_CODE_OK) {
             sv_setsv(errsv, sv_2mortal(datasv));
             sv_setuv(errsv, errcode);
