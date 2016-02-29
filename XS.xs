@@ -637,7 +637,12 @@ static SV *iprotoxs_request_data(SV *options, SV *errsv) {
         if (!(val && SvPOK(*val)))
             croak("\"method\" in \"request\" should be a string");
         char *method = SvPV_nolen(*val);
-        if (strcmp(method, "pack") == 0) {
+        if (strcmp(method, "raw") == 0) {
+            val = hv_fetch(optshv, "data", 4, 0);
+            if (!(val && SvPOK(*val)))
+                croak("\"data\" should be a string if method \"raw\" is used");
+            data = SvREFCNT_inc(*val);
+        } else if (strcmp(method, "pack") == 0) {
             data = iprotoxs_pack_data(optshv);
         } else if (strcmp(method, "sub") == 0) {
             val = hv_fetch(optshv, "data", 4, 0);
@@ -760,7 +765,9 @@ static SV *iprotoxs_message_response(iproto_message_t *message, HV *options, boo
     if (!(val && SvPOK(*val)))
         croak("\"method\" in \"response\" should be a string");
     char *method = SvPV_nolen(*val);
-    if (strcmp(method, "unpack") == 0) {
+    if (strcmp(method, "raw") == 0) {
+        return datasv;
+    } else if (strcmp(method, "unpack") == 0) {
         AV *dataav = iprotoxs_unpack_data(options, datasv, errsv);
         SvREFCNT_dec(datasv);
         return dataav ? newRV_noinc((SV *)dataav) : NULL;

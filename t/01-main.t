@@ -1,7 +1,7 @@
 use utf8;
 use strict;
 use warnings;
-use Test::More tests => 98;
+use Test::More tests => 99;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use IO::Socket;
@@ -487,6 +487,18 @@ sub check_coders {
         my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
         my $resp = $iproto->do({ %msgopts, code => 17, request => Ololo => () });
         is_deeply($resp, { error => "Request should be byte string, not character" }, "utf8 characters detection: ASCII with UTF-8 flag");
+    }
+
+    {
+        my $port = fork_test_server(sub { check_and_reply($_[0], 17, "REQ", "\0\0\0\0"."ALLOK") });
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
+        my $resp = $iproto->do({
+            %msgopts,
+            code     => 17,
+            request  => { method => 'raw', data => "REQ" },
+            response => { method => 'raw', errcode => 4 },
+        });
+        is_deeply($resp, { error => "ok", data => "ALLOK" }, "raw & errcode");
     }
 
     close_all_servers();
