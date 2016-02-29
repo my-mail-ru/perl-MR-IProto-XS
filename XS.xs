@@ -754,9 +754,16 @@ static SV *iprotoxs_message_response(iproto_message_t *message, HV *options, boo
         sv_chop(datasv, SvPVX_const(datasv) + bytes);
 #endif
         if (errcode != ERR_CODE_OK) {
-            sv_setsv(errsv, sv_2mortal(datasv));
             sv_setuv(errsv, errcode);
-            SvPOK_on(errsv);
+            val = hv_fetch(options, "errstr", 6, 0);
+            if (val && SvTRUE(*val) && SvCUR(datasv) > 0) {
+                sv_setpv(errsv, "server error: ");
+                sv_catsv(errsv, datasv);
+            } else {
+                sv_setpvf(errsv, "server error: 0x%"UVxf, errcode);
+            }
+            SvIOK_on(errsv);
+            SvREFCNT_dec(datasv);
             return NULL;
         }
     }

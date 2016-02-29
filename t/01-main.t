@@ -469,9 +469,9 @@ sub check_coders {
             %msgopts,
             code     => 17,
             request  => { method => 'sub', sub => sub { join ',', @{$_[0]} }, data => [1, 2, 3] },
-            response => { method => 'sub', sub => sub { [ split /,/, $_[0] ] }, errcode => 4 },
+            response => { method => 'sub', sub => sub { [ split /,/, $_[0] ] }, errcode => 4, errstr => 1 },
         });
-        is_deeply($resp, { error => "something happened" }, "decode errcode: failure");
+        is_deeply($resp, { error => "server error: something happened" }, "decode errcode: failure");
         ok($resp->{error} == 4, "decode errocode: valid numeric error");
     }
 
