@@ -1,6 +1,7 @@
+use utf8;
 use strict;
 use warnings;
-use Test::More tests => 96;
+use Test::More tests => 98;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use IO::Socket;
@@ -472,6 +473,20 @@ sub check_coders {
         });
         is_deeply($resp, { error => "something happened" }, "decode errcode: failure");
         ok($resp->{error} == 4, "decode errocode: valid numeric error");
+    }
+
+    {
+        my $port = fork_test_server(sub { });
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
+        my $resp = $iproto->do({ %msgopts, code => 17, request => "Ёхохо" });
+        is_deeply($resp, { error => "Request should be byte string, not character" }, "utf8 characters detection: multi-byte UTF-8");
+    }
+
+    {
+        my $port = fork_test_server(sub { });
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
+        my $resp = $iproto->do({ %msgopts, code => 17, request => Ololo => () });
+        is_deeply($resp, { error => "Request should be byte string, not character" }, "utf8 characters detection: ASCII with UTF-8 flag");
     }
 
     close_all_servers();

@@ -628,8 +628,9 @@ void iprotoxs_parse_opts(iproto_message_opts_t *opts, HV *request) {
 }
 
 static SV *iprotoxs_request_data(SV *options, SV *errsv) {
+    SV *data;
     if (SvPOK(options)) {
-        return SvREFCNT_inc(options);
+        data = SvREFCNT_inc(options);
     } else if (SvROK(options) && SvTYPE(SvRV(options)) == SVt_PVHV) {
         HV *optshv = (HV *)SvRV(options);
         SV **val = hv_fetch(optshv, "method", 6, 0);
@@ -637,18 +638,26 @@ static SV *iprotoxs_request_data(SV *options, SV *errsv) {
             croak("\"method\" in \"request\" should be a string");
         char *method = SvPV_nolen(*val);
         if (strcmp(method, "pack") == 0) {
-            return iprotoxs_pack_data(optshv);
+            data = iprotoxs_pack_data(optshv);
         } else if (strcmp(method, "sub") == 0) {
             val = hv_fetch(optshv, "data", 4, 0);
             if (!val)
                 croak("\"data\" should exist if method \"sub\" is used");
-            return iprotoxs_call_coder(optshv, *val, errsv);
+            data = iprotoxs_call_coder(optshv, *val, errsv);
         } else {
             croak("invalid \"method\" value");
         }
     } else {
         croak("invalid \"request\" value");
     }
+    if (data && SvUTF8(data)) {
+        SvREFCNT_dec(data);
+        sv_setuv(errsv, ERR_CODE_PROTO_ERR);
+        sv_setpv(errsv, "Request should be byte string, not character");
+        SvIOK_on(errsv);
+        return NULL;
+    }
+    return data;
 }
 
 static iproto_message_t *iprotoxs_message_init(iprotoxs_data_t *context) {
