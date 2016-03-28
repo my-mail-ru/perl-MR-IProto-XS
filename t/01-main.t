@@ -1,7 +1,7 @@
 use utf8;
 use strict;
 use warnings;
-use Test::More tests => 99;
+use Test::More tests => 100;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use IO::Socket;
@@ -382,6 +382,13 @@ sub check_success {
         sleep 0.2;
         $resp = $iproto->bulk([ map $msg, (11 .. 13)]);
         is_deeply($resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 13) ], "closed by server 2");
+    }
+
+    {
+        my $port = fork_test_server(sub { check_and_reply($_[0], 17, "OLOLO", "") });
+        my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
+        my $resp = $iproto->do({ %msgopts, code => 17, request => "OLOLO" });
+        is_deeply($resp, { error => "ok", data => "" }, "empty response");
     }
 
     close_all_servers();

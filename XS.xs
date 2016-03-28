@@ -466,12 +466,6 @@ static AV *iprotoxs_unpack_data(HV *opts, SV *data, SV *errsv) {
         croak("\"format\" should be a SCALAR if method \"unpack\" is used");
     /* We should use G_EVAL, so can't use unpackstring() function directly */
     SV *format = *sv;
-    if (SvCUR(data) == 0 && SvCUR(format) != 0) {
-        sv_setuv(errsv, ERR_CODE_PROTO_ERR);
-        sv_setpvf(errsv, "Response data is empty, should be '%s'", SvPV_nolen(format));
-        SvIOK_on(errsv);
-        return NULL;
-    }
     dSP;
     dMY_CXT;
     ENTER;
@@ -716,7 +710,7 @@ static iproto_message_t *iprotoxs_message_init(iprotoxs_data_t *context) {
 static SV *iprotoxs_message_response(iproto_message_t *message, HV *options, bool *replica, SV *errsv) {
     size_t size;
     void *data = iproto_message_response(message, &size, replica);
-    SV *datasv = newSVpvn(data, size);
+    SV *datasv = data ? newSVpvn(data, size) : newSVpvn("", 0);
     if (!options)
         return datasv;
 
@@ -728,7 +722,7 @@ static SV *iprotoxs_message_response(iproto_message_t *message, HV *options, boo
         size_t bytes = SvUV(*val);
         if (size < bytes) {
             sv_setuv(errsv, ERR_CODE_PROTO_ERR);
-            sv_setpvf(errsv, "Response is too short (%zd bytes when %zd is required)", bytes, size);
+            sv_setpvf(errsv, "Response is too short (%"UVuf" bytes when %"UVuf" is required)", (UV)size, (UV)bytes);
             SvIOK_on(errsv);
             return NULL;
         }
