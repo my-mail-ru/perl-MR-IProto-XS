@@ -213,9 +213,7 @@ static void iprotoxs_stat_callback(const char *type, const char *server, uint32_
     LEAVE;
 }
 
-static void iprotoxs_callback(iproto_message_t *message) {
-    iprotoxs_data_t *context = (iprotoxs_data_t *)iproto_message_options(message)->data;
-    assert(context->message == message);
+static void iprotoxs_context_callback(iprotoxs_data_t *context) {
     dSP;
     ENTER;
     SAVETMPS;
@@ -230,6 +228,12 @@ static void iprotoxs_callback(iproto_message_t *message) {
     FREETMPS;
     LEAVE;
     iprotoxs_context_free(context);
+}
+
+static void iprotoxs_callback(iproto_message_t *message) {
+    iprotoxs_data_t *context = (iprotoxs_data_t *)iproto_message_options(message)->data;
+    assert(context->message == message);
+    iprotoxs_context_callback(context);
 }
 
 static bool iprotoxs_soft_retry_callback(iproto_message_t *message) {
@@ -690,12 +694,8 @@ static iproto_message_t *iprotoxs_message_init(iprotoxs_data_t *context) {
     opts->data = context;
     iprotoxs_parse_opts(opts, reqhv);
 
-    if ((val = hv_fetch(reqhv, "callback", 8, 0))) {
-        if (!(SvROK(*val) || SvTYPE(SvRV(*val)) == SVt_PVCV))
-            croak("\"callback\" should be a CODEREF");
+    if (context->callback)
         opts->callback = iprotoxs_callback;
-        context->callback = SvREFCNT_inc(*val);
-    }
 
     if ((val = hv_fetch(reqhv, "soft_retry_callback", 19, 0))) {
         if (!(SvROK(*val) && SvTYPE(SvRV(*val)) == SVt_PVCV))
@@ -790,10 +790,18 @@ static iprotoxs_data_t *iprotoxs_context_init(MR__IProto__XS iprotoxs, SV *reque
     context->request = SvREFCNT_inc(request);
     context->error = newSV(0);
 
-    SV **val = hv_fetch((HV *)SvRV(request), "iproto", 6, 0);
+    HV *reqhv = (HV *)SvRV(request);
+
+    SV **val = hv_fetch(reqhv, "iproto", 6, 0);
     SV *ixs = val ? *val : iprotoxs;
     if (!ixs) croak("\"iproto\" should be specified");
     context->iprotoxs = SvREFCNT_inc(ixs);
+
+    if ((val = hv_fetch(reqhv, "callback", 8, 0))) {
+        if (!(SvROK(*val) || SvTYPE(SvRV(*val)) == SVt_PVCV))
+            croak("\"callback\" should be a CODEREF");
+        context->callback = SvREFCNT_inc(*val);
+    }
 
     context->message = iprotoxs_message_init(context);
 
@@ -862,8 +870,11 @@ static SV *iprotoxs_context_response(iprotoxs_data_t *context) {
 }
 
 static SV *iprotoxs_context_retval(iprotoxs_data_t *context) {
-    if (context->callback)
+    if (context->callback) {
+        if (!context->message)
+            iprotoxs_context_callback(context);
         return &PL_sv_undef;
+    }
     SV *retval = iprotoxs_context_response(context);
     iprotoxs_context_free(context);
     return retval;

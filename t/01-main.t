@@ -1,7 +1,7 @@
 use utf8;
 use strict;
 use warnings;
-use Test::More tests => 100;
+use Test::More tests => 101;
 use Test::LeakTrace;
 use Perl::Destruct::Level level => 2;
 use IO::Socket;
@@ -1016,7 +1016,7 @@ sub check_singleton {
 
 sub check_async {
     SKIP: {
-        skip "cannot check async when internal loop is used", 1 unless $ev || $coro;
+        skip "cannot check async when internal loop is used", 2 unless $ev || $coro;
         my $msg = { %msgopts, code => 17, request => { method => 'pack', format => 'Lw/a*L*', data => [ 89, 'test', 15 ] }, response => { method => 'unpack', format => 'w/a*L*' } };
         my $port = fork_test_server(sub {
             my ($socket) = @_;
@@ -1032,6 +1032,16 @@ sub check_async {
         $iproto->do($msg);
         $cv->recv();
         is_deeply(\@resp, [ map {{ error => "ok", data => [ 'test', $_ ] }} (11 .. 23) ], "async request");
+
+        {
+            my $port = fork_test_server(sub { });
+            my $iproto = MR::IProto::XS->new(%newopts, masters => ["127.0.0.1:$port"]);
+            my $resp;
+            $iproto->do({ %msgopts, code => 17, request => "Ёхохо", callback => sub { $resp = $_[0]; $cv->send() } });
+            $cv->recv();
+            is_deeply($resp, { error => "Request should be byte string, not character" }, "async invalid request");
+        }
+
         close_all_servers();
     }
     return;
