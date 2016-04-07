@@ -6141,13 +6141,17 @@ DPPP_(my_warner)(U32 err, const char *pat, ...)
 #  define HEf_SVKEY                      -2
 #endif
 
+#ifndef MUTABLE_PTR
 #if defined(__GNUC__) && !defined(PERL_GCC_BRACE_GROUPS_FORBIDDEN)
 #  define MUTABLE_PTR(p) ({ void *_p = (p); _p; })
 #else
 #  define MUTABLE_PTR(p) ((void *) (p))
 #endif
+#endif
 
+#ifndef MUTABLE_SV
 #define MUTABLE_SV(p)   ((SV *)MUTABLE_PTR(p))
+#endif
 
 /* end of random bits */
 #ifndef PERL_MAGIC_sv
