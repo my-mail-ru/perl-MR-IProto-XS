@@ -16,7 +16,7 @@ BuildRequires:  perl(EV), perl(Coro)
 BuildRequires:  libiprotocluster-devel >= %{__libiprotocluster_version}
 BuildRequires:  libiprotocluster >= %{__libiprotocluster_version}
 Requires:       perl(:MODULE_COMPAT_%(eval "`%{__perl} -V:version`"; echo $version))
-Requires:       prel(EV)
+Requires:       perl(EV)
 Requires:       libiprotocluster >= %{__libiprotocluster_version}
 
 %description
